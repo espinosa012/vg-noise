@@ -1,0 +1,34 @@
+# Build artifacts
+*.o
+*.obj
+
+# Compiled shared libraries (in repo root and dist/)
+*.dylib
+*.so
+*.dll
+
+# Build output dir
+dist/
+
+# LuaJIT/Lua cache
+*.luac
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Tag files
+tags
+TAGS
+
+# Logs / tmp
+*.log
+*.tmp
