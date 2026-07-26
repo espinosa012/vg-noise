@@ -21,6 +21,7 @@ desktop.ini
 # Editor
 .vscode/
 .idea/
+.opencode/
 *.swp
 *.swo
 *~
