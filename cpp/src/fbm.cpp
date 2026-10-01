@@ -32,7 +32,11 @@ float fbm_sample(const noise_state_t* s, int base, float x, float y,
     float norm = 0.0f;
     for (int o = 0; o < octaves; ++o) {
         float n = base2(s, base, x * freq, y * freq);
-        if (mode == RIDGE) n = 1.0f - fabsf(n);
+        if (mode == RIDGE) {
+            // Sharp crests where the base noise crosses zero: (1 - |n|)^2.
+            n = 1.0f - fabsf(n);
+            n *= n;
+        }
         else if (mode == TURB) n = fabsf(n);
         sum += n * amp;
         norm += amp;
@@ -51,7 +55,11 @@ float fbm_sample3(const noise_state_t* s, int base, float x, float y, float z,
     float norm = 0.0f;
     for (int o = 0; o < octaves; ++o) {
         float n = base3(s, base, x * freq, y * freq, z * freq);
-        if (mode == RIDGE) n = 1.0f - fabsf(n);
+        if (mode == RIDGE) {
+            // Sharp crests where the base noise crosses zero: (1 - |n|)^2.
+            n = 1.0f - fabsf(n);
+            n *= n;
+        }
         else if (mode == TURB) n = fabsf(n);
         sum += n * amp;
         norm += amp;
