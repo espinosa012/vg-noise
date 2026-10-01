@@ -16,6 +16,31 @@ static const int GRAD3[12][3] = {
     { 0,  1, 1}, { 0, -1, 1}, { 0,  1,-1}, { 0, -1,-1}
 };
 
+// 2D gradients: 16 unit vectors evenly spaced around the circle (offset by
+// half a step so none is axis-aligned). An isotropic set avoids the long
+// straight diagonal/horizontal streaks of a reduced gradient set.
+static const float GRAD2[16][2] = {
+    {0.980785280f, 0.195090322f},
+    {0.831469612f, 0.555570233f},
+    {0.555570233f, 0.831469612f},
+    {0.195090322f, 0.980785280f},
+    {-0.195090322f, 0.980785280f},
+    {-0.555570233f, 0.831469612f},
+    {-0.831469612f, 0.555570233f},
+    {-0.980785280f, 0.195090322f},
+    {-0.980785280f, -0.195090322f},
+    {-0.831469612f, -0.555570233f},
+    {-0.555570233f, -0.831469612f},
+    {-0.195090322f, -0.980785280f},
+    {0.195090322f, -0.980785280f},
+    {0.555570233f, -0.831469612f},
+    {0.831469612f, -0.555570233f},
+    {0.980785280f, -0.195090322f}
+};
+
+// Output scale so 2D simplex spans approximately [-1, 1] with unit gradients.
+static const float SIMPLEX2_SCALE = 99.2f;
+
 static inline int fastfloor(float x) {
     int i = (int)x;
     return (x < 0 && x != i) ? i - 1 : i;
@@ -43,19 +68,19 @@ float simplex2(const noise_state_t* s, float x, float y) {
     int ii = i & 255;
     int jj = j & 255;
     const unsigned int* p = s->perm;
-    int gi0 = (int)(p[ii       + p[jj      ]] & 7);
-    int gi1 = (int)(p[ii + i1  + p[jj + j1 ]] & 7);
-    int gi2 = (int)(p[ii + 1   + p[jj + 1  ]] & 7);
+    int gi0 = (int)(p[ii       + p[jj      ]] & 15);
+    int gi1 = (int)(p[ii + i1  + p[jj + j1 ]] & 15);
+    int gi2 = (int)(p[ii + 1   + p[jj + 1  ]] & 15);
 
     float n0 = 0, n1 = 0, n2 = 0;
     float t0 = 0.5f - x0 * x0 - y0 * y0;
-    if (t0 >= 0) { t0 *= t0; n0 = t0 * t0 * (GRAD3[gi0][0] * x0 + GRAD3[gi0][1] * y0); }
+    if (t0 >= 0) { t0 *= t0; n0 = t0 * t0 * (GRAD2[gi0][0] * x0 + GRAD2[gi0][1] * y0); }
     float t1 = 0.5f - x1 * x1 - y1 * y1;
-    if (t1 >= 0) { t1 *= t1; n1 = t1 * t1 * (GRAD3[gi1][0] * x1 + GRAD3[gi1][1] * y1); }
+    if (t1 >= 0) { t1 *= t1; n1 = t1 * t1 * (GRAD2[gi1][0] * x1 + GRAD2[gi1][1] * y1); }
     float t2 = 0.5f - x2 * x2 - y2 * y2;
-    if (t2 >= 0) { t2 *= t2; n2 = t2 * t2 * (GRAD3[gi2][0] * x2 + GRAD3[gi2][1] * y2); }
+    if (t2 >= 0) { t2 *= t2; n2 = t2 * t2 * (GRAD2[gi2][0] * x2 + GRAD2[gi2][1] * y2); }
 
-    return 47.0f * (n0 + n1 + n2);
+    return SIMPLEX2_SCALE * (n0 + n1 + n2);
 }
 
 float simplex3(const noise_state_t* s, float x, float y, float z) {

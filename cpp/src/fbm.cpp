@@ -23,6 +23,14 @@ static inline float base3(const noise_state_t* s, int base,
     }
 }
 
+// Per-octave domain offset. Without it every octave samples the same field
+// from the same origin, so with integer lacunarity the lattices of all
+// octaves line up and the sum shows straight grid lines. The offsets are
+// small irrational-ish steps, keeping float precision intact.
+static inline float octave_offset(int o, float k) {
+    return (float)o * k;
+}
+
 float fbm_sample(const noise_state_t* s, int base, float x, float y,
                  int octaves, float lac, float gain, int mode) {
     if (!s || octaves <= 0) return 0.0f;
@@ -31,7 +39,8 @@ float fbm_sample(const noise_state_t* s, int base, float x, float y,
     float freq = 1.0f;
     float norm = 0.0f;
     for (int o = 0; o < octaves; ++o) {
-        float n = base2(s, base, x * freq, y * freq);
+        float n = base2(s, base, x * freq + octave_offset(o, 31.4159f),
+                        y * freq + octave_offset(o, 17.2207f));
         if (mode == RIDGE) {
             // Sharp crests where the base noise crosses zero: (1 - |n|)^2.
             n = 1.0f - fabsf(n);
@@ -54,7 +63,9 @@ float fbm_sample3(const noise_state_t* s, int base, float x, float y, float z,
     float freq = 1.0f;
     float norm = 0.0f;
     for (int o = 0; o < octaves; ++o) {
-        float n = base3(s, base, x * freq, y * freq, z * freq);
+        float n = base3(s, base, x * freq + octave_offset(o, 31.4159f),
+                        y * freq + octave_offset(o, 17.2207f),
+                        z * freq + octave_offset(o, 23.9071f));
         if (mode == RIDGE) {
             // Sharp crests where the base noise crosses zero: (1 - |n|)^2.
             n = 1.0f - fabsf(n);
