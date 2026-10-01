@@ -15,7 +15,7 @@ No external dependencies — only a C++17 compiler and `make`.
 - **Perlin** (improved gradient, fade `6t^5 − 15t^4 + 10t^3`) — 2D / 3D
 - **OpenSimplex2S** (K.jpg, public domain, deterministic, patent-free)
   — 2D / 3D
-- **White noise** (deterministic integer hash) — 2D / 3D
+- **White noise** (deterministic integer hash of the cell and the seed) — 2D / 3D
 
 All evaluation functions operate on `float` and return values in
 `[-1, 1]` (approximately).
