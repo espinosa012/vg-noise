@@ -175,11 +175,11 @@ returns a Lua wrapper object. Garbage-collected by LuaJIT.
 
 | Method                              | Defaults                                |
 |-------------------------------------|------------------------------------------|
-| `state:fbm2(x, y, octaves, base)`   | `octaves=6`, `lac=2.0`, `gain=0.5`      |
-| `state:fbm3(x, y, z, octaves, base)`| `octaves=6`, `lac=2.0`, `gain=0.5`      |
-| `state:ridge2(x, y, octaves, base)` | same                                     |
+| `state:fbm2(x, y, octaves, base, lac, gain)` | `octaves=6`, `lac=2.0`, `gain=0.5`      |
+| `state:fbm3(x, y, z, octaves, base, lac, gain)` | `octaves=6`, `lac=2.0`, `gain=0.5`      |
+| `state:ridge2(x, y, octaves, base, lac, gain)` | same                                     |
 | `state:ridge3(...)`                  | same                                     |
-| `state:turb2(x, y, octaves, base)`   | same                                     |
+| `state:turb2(x, y, octaves, base, lac, gain)` | same                                     |
 | `state:turb3(...)`                   | same                                     |
 
 ### Batch helpers (module-level)

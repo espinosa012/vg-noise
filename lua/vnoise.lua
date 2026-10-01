@@ -103,29 +103,31 @@ function State:simplex3(x, y, z)   return lib.simplex3_eval(self.s, x, y, z) end
 function State:white2(ix, iy)      return lib.white2_eval(self.s, ix, iy) end
 function State:white3(ix, iy, iz) return lib.white3_eval(self.s, ix, iy, iz) end
 
-function State:fbm2(x, y, octaves, base)
+-- Fractal samplers. lac (lacunarity) and gain are optional and default to
+-- 2.0 and 0.5, matching fill_grid / fill_volume / fill_imagedata.
+function State:fbm2(x, y, octaves, base, lac, gain)
     return lib.fbm2_eval(self.s, base or vnoise.BASE_SIMPLEX2,
-                        x, y, octaves or 6, 2.0, 0.5)
+                        x, y, octaves or 6, lac or 2.0, gain or 0.5)
 end
-function State:fbm3(x, y, z, octaves, base)
+function State:fbm3(x, y, z, octaves, base, lac, gain)
     return lib.fbm3_eval(self.s, base or vnoise.BASE_SIMPLEX3,
-                        x, y, z, octaves or 6, 2.0, 0.5)
+                        x, y, z, octaves or 6, lac or 2.0, gain or 0.5)
 end
-function State:ridge2(x, y, octaves, base)
+function State:ridge2(x, y, octaves, base, lac, gain)
     return lib.ridge2_eval(self.s, base or vnoise.BASE_SIMPLEX2,
-                          x, y, octaves or 6, 2.0, 0.5)
+                          x, y, octaves or 6, lac or 2.0, gain or 0.5)
 end
-function State:ridge3(x, y, z, octaves, base)
+function State:ridge3(x, y, z, octaves, base, lac, gain)
     return lib.ridge3_eval(self.s, base or vnoise.BASE_SIMPLEX3,
-                          x, y, z, octaves or 6, 2.0, 0.5)
+                          x, y, z, octaves or 6, lac or 2.0, gain or 0.5)
 end
-function State:turb2(x, y, octaves, base)
+function State:turb2(x, y, octaves, base, lac, gain)
     return lib.turb2_eval(self.s, base or vnoise.BASE_SIMPLEX2,
-                         x, y, octaves or 6, 2.0, 0.5)
+                         x, y, octaves or 6, lac or 2.0, gain or 0.5)
 end
-function State:turb3(x, y, z, octaves, base)
+function State:turb3(x, y, z, octaves, base, lac, gain)
     return lib.turb3_eval(self.s, base or vnoise.BASE_SIMPLEX3,
-                         x, y, z, octaves or 6, 2.0, 0.5)
+                         x, y, z, octaves or 6, lac or 2.0, gain or 0.5)
 end
 
 local FNS_2D = {
