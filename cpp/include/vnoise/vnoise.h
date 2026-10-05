@@ -103,6 +103,53 @@ VNOISE_API void turb2_fill_imagedata_rgba8(const noise_state_t* s, int base,
                                            unsigned char r, unsigned char g,
                                            unsigned char b, unsigned char a);
 
+/* Value operations: an ordered chain applied to noise values after sampling.
+ * Each op reads up to four parameters from p[]; unused entries are ignored.
+ *   REMAP    (v - p[0]) / (p[1] - p[0])   (0 when p[1] == p[0])
+ *   SCALE    v * p[0]
+ *   OFFSET   v + p[0]
+ *   CONTRAST (v - p[1]) * p[0] + p[1]     (factor p[0] around pivot p[1])
+ * Ops run in array order on unclamped values; only the final result is
+ * optionally clamped to [0, 1]. Unknown op ids leave the value unchanged. */
+#define VNOISE_OP_REMAP    0
+#define VNOISE_OP_SCALE    1
+#define VNOISE_OP_OFFSET   2
+#define VNOISE_OP_CONTRAST 3
+
+typedef struct {
+    int op;
+    float p[4];
+} vnoise_op_t;
+
+VNOISE_API float vnoise_apply_ops(float v, const vnoise_op_t* ops, int n,
+                                  int clamp01);
+VNOISE_API void vnoise_map_buffer(float* buf, int count,
+                                  const vnoise_op_t* ops, int n, int clamp01);
+
+/* Like *_fill_imagedata_rgba8, but each pixel is t = clamp01(chain(noise))
+ * with the op chain (ops, n) in place of the lo/hi range. */
+VNOISE_API void fbm2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
+                                              unsigned char* out, int w, int h,
+                                              float ox, float oy, float freq,
+                                              int octaves, float lac, float gain,
+                                              const vnoise_op_t* ops, int n,
+                                              unsigned char r, unsigned char g,
+                                              unsigned char b, unsigned char a);
+VNOISE_API void ridge2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
+                                                unsigned char* out, int w, int h,
+                                                float ox, float oy, float freq,
+                                                int octaves, float lac, float gain,
+                                                const vnoise_op_t* ops, int n,
+                                                unsigned char r, unsigned char g,
+                                                unsigned char b, unsigned char a);
+VNOISE_API void turb2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
+                                               unsigned char* out, int w, int h,
+                                               float ox, float oy, float freq,
+                                               int octaves, float lac, float gain,
+                                               const vnoise_op_t* ops, int n,
+                                               unsigned char r, unsigned char g,
+                                               unsigned char b, unsigned char a);
+
 #ifdef __cplusplus
 }
 #endif

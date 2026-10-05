@@ -113,6 +113,36 @@ void turb2_fill_imagedata_rgba8(const noise_state_t* s, int base,
                                 float lo, float hi,
                                 unsigned char r, unsigned char g,
                                 unsigned char b, unsigned char a);
+
+typedef struct {
+    int op;
+    float p[4];
+} vnoise_op_t;
+
+float vnoise_apply_ops(float v, const vnoise_op_t* ops, int n, int clamp01);
+void vnoise_map_buffer(float* buf, int count, const vnoise_op_t* ops, int n, int clamp01);
+
+void fbm2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
+                                   unsigned char* out, int w, int h,
+                                   float ox, float oy, float freq,
+                                   int octaves, float lac, float gain,
+                                   const vnoise_op_t* ops, int n,
+                                   unsigned char r, unsigned char g,
+                                   unsigned char b, unsigned char a);
+void ridge2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
+                                     unsigned char* out, int w, int h,
+                                     float ox, float oy, float freq,
+                                     int octaves, float lac, float gain,
+                                     const vnoise_op_t* ops, int n,
+                                     unsigned char r, unsigned char g,
+                                     unsigned char b, unsigned char a);
+void turb2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
+                                    unsigned char* out, int w, int h,
+                                    float ox, float oy, float freq,
+                                    int octaves, float lac, float gain,
+                                    const vnoise_op_t* ops, int n,
+                                    unsigned char r, unsigned char g,
+                                    unsigned char b, unsigned char a);
 ]])
 
 local vnoise = {
@@ -122,7 +152,61 @@ local vnoise = {
   BASE_SIMPLEX3 = 3,
   BASE_WHITE2 = 4,
   BASE_WHITE3 = 5,
+  -- Value operation ids (see compile_ops).
+  OP_REMAP = 0,
+  OP_SCALE = 1,
+  OP_OFFSET = 2,
+  OP_CONTRAST = 3,
 }
+
+-- Op names accepted in op lists, mapped to their ids.
+local OP_IDS = {
+  remap = vnoise.OP_REMAP,
+  scale = vnoise.OP_SCALE,
+  offset = vnoise.OP_OFFSET,
+  contrast = vnoise.OP_CONTRAST,
+}
+
+-- Metatable that marks a compiled op chain: { ops = vnoise_op_t[n], n = n }.
+local Chain = {}
+
+--- Compiles an op list into a chain the native functions accept. Each entry
+-- is `{ name_or_id, p0, p1, ... }` (up to four parameters, missing ones are
+-- 0), e.g. `{ {"remap", -1, 1}, {"contrast", 2, 0.5} }`. The result can be
+-- reused across calls to avoid rebuilding the array; a compiled chain is
+-- returned unchanged.
+-- @param list table The op list, or an already compiled chain.
+-- @return table The compiled chain `{ ops = cdata, n = count }`.
+function vnoise.compile_ops(list)
+  if getmetatable(list) == Chain then
+    return list
+  end
+  local n = #list
+  local ops = ffi.new("vnoise_op_t[?]", math.max(n, 1))
+  for k = 1, n do
+    local entry = list[k]
+    local id = entry[1]
+    if type(id) == "string" then
+      id = OP_IDS[id] or error("vnoise: unknown op '" .. id .. "'", 2)
+    end
+    local o = ops[k - 1]
+    o.op = id
+    for i = 1, 4 do
+      o.p[i - 1] = entry[i + 1] or 0
+    end
+  end
+  return setmetatable({ ops = ops, n = n }, Chain)
+end
+
+--- Applies an op chain to one value.
+-- @param v number The input value.
+-- @param ops table An op list or compiled chain.
+-- @param clamp boolean|nil Clamp the result to [0, 1] (default true).
+-- @return number The result.
+function vnoise.apply_ops(v, ops, clamp)
+  local chain = vnoise.compile_ops(ops)
+  return lib.vnoise_apply_ops(v, chain.ops, chain.n, clamp == false and 0 or 1)
+end
 
 local State = {}
 State.__index = State
@@ -201,6 +285,11 @@ function vnoise.fill_grid(state, kind, opts)
     opts.lac or 2.0,
     opts.gain or 0.5
   )
+  -- Optional op chain over the raw values (clamped unless opts.clamp is false).
+  if opts.ops then
+    local chain = vnoise.compile_ops(opts.ops)
+    lib.vnoise_map_buffer(out, w * h, chain.ops, chain.n, opts.clamp == false and 0 or 1)
+  end
   return out
 end
 
@@ -232,10 +321,48 @@ local IMG_FNS = {
   turb = lib.turb2_fill_imagedata_rgba8,
 }
 
+local IMG_OPS_FNS = {
+  fbm = lib.fbm2_fill_imagedata_ops_rgba8,
+  ridge = lib.ridge2_fill_imagedata_ops_rgba8,
+  turb = lib.turb2_fill_imagedata_ops_rgba8,
+}
+
+-- With opts.ops, fills through the chain remap(lo, hi) followed by opts.ops
+-- (one native pass); without it, maps [lo, hi] to [0, 255] as before.
 function vnoise.fill_imagedata(state, kind, img, opts)
   local fn = IMG_FNS[kind] or error("unknown fractal kind '" .. tostring(kind) .. "'", 2)
   local w, h = img:getDimensions()
   local ptr = ffi.cast("unsigned char*", img:getPointer())
+  if opts.ops then
+    local chain = vnoise.compile_ops(opts.ops)
+    local ops = ffi.new("vnoise_op_t[?]", chain.n + 1)
+    ops[0].op = vnoise.OP_REMAP
+    ops[0].p[0] = opts.lo or -1
+    ops[0].p[1] = opts.hi or 1
+    if chain.n > 0 then
+      ffi.copy(ops + 1, chain.ops, chain.n * ffi.sizeof("vnoise_op_t"))
+    end
+    IMG_OPS_FNS[kind](
+      state.s,
+      opts.base or vnoise.BASE_SIMPLEX2,
+      ptr,
+      w,
+      h,
+      opts.ox or 0,
+      opts.oy or 0,
+      opts.freq or 0.01,
+      opts.octaves or 6,
+      opts.lac or 2.0,
+      opts.gain or 0.5,
+      ops,
+      chain.n + 1,
+      opts.r or 255,
+      opts.g or 255,
+      opts.b or 255,
+      opts.a or 255
+    )
+    return img
+  end
   fn(
     state.s,
     opts.base or vnoise.BASE_SIMPLEX2,

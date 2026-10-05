@@ -37,5 +37,5 @@ $(TARGET): $(OBJS)
 clean:
 	rm -f $(OBJS) $(TARGET) tests/smoke
 
-test:
-	@echo "test target placeholder (smoke tests via examples/love2d)"
+test: $(TARGET)
+	luajit tests/value_ops.lua

@@ -46,6 +46,37 @@ the inner loop and the FFI overhead is amortized to zero per pixel.
   range `[lo, hi]` to `[0, 255]` with clamping. Ready to upload to the
   GPU as a texture.
 
+### Value operations
+
+An ordered chain of pointwise operations can post-process noise values
+in the same pass as the sampling. Ops run in order on unclamped values;
+only the final result is (optionally) clamped to `[0, 1]`.
+
+| Op | Effect on `v` |
+|----|---------------|
+| `remap(lo, hi)` | `(v - lo) / (hi - lo)` (0 for a zero range) |
+| `scale(k)` | `v * k` |
+| `offset(d)` | `v + d` |
+| `contrast(k, pivot)` | `(v - pivot) * k + pivot` |
+
+C: `vnoise_op_t { int op; float p[4]; }` with `VNOISE_OP_*` ids,
+`vnoise_apply_ops(v, ops, n, clamp01)`, `vnoise_map_buffer(buf, count,
+ops, n, clamp01)` and `*_fill_imagedata_ops_rgba8` (op chain instead of
+`lo`/`hi`). Unknown op ids leave the value unchanged.
+
+Lua:
+
+```lua
+local chain = vnoise.compile_ops({ { "contrast", 1.8, 0.5 }, { "offset", -0.1 } })
+vnoise.fill_imagedata(state, "fbm", img, { lo = -0.8, hi = 0.8, ops = chain }) -- remap(lo, hi) is prepended
+vnoise.fill_grid(state, "fbm", { w = 64, h = 64, ops = { { "remap", -1, 1 }, { "scale", 0.5 } } }) -- clamp defaults to true
+vnoise.apply_ops(0.4, chain)                                                    -- one value
+```
+
+`compile_ops` accepts names or ids and raises on unknown names; pass the
+compiled chain to avoid rebuilding it on every call. `make test` runs
+`tests/value_ops.lua` with LuaJIT.
+
 ### Determinism
 
 - Same seed produces the **same output within the same build**
