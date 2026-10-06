@@ -58,6 +58,7 @@ float simplex2_eval(const noise_state_t* s, float x, float y);
 float simplex3_eval(const noise_state_t* s, float x, float y, float z);
 float white2_eval(const noise_state_t* s, int ix, int iy);
 float white3_eval(const noise_state_t* s, int ix, int iy, int iz);
+void white2_fill_grid(const noise_state_t* s, float* out, int ox, int oy, int w, int h);
 
 float fbm2_eval(const noise_state_t* s, int base, float x, float y,
                 int octaves, float lac, float gain);
@@ -286,6 +287,22 @@ function vnoise.fill_grid(state, kind, opts)
     opts.gain or 0.5
   )
   -- Optional op chain over the raw values (clamped unless opts.clamp is false).
+  if opts.ops then
+    local chain = vnoise.compile_ops(opts.ops)
+    lib.vnoise_map_buffer(out, w * h, chain.ops, chain.n, opts.clamp == false and 0 or 1)
+  end
+  return out
+end
+
+-- Fills a float[w*h] buffer with seeded 2D white noise over integer cells:
+-- out[j * w + i] = state:white2(ox + i, oy + j), values in [-1, 1].
+-- opts: w, h (default 256), ox, oy (integer cell origin, default 0), out
+-- (optional pre-allocated buffer), ops (optional op list or compiled chain)
+-- and clamp (clamp the op results to 0..1, default true), as in fill_grid.
+function vnoise.fill_white(state, opts)
+  local w, h = opts.w or 256, opts.h or 256
+  local out = opts.out or ffi.new("float[?]", w * h)
+  lib.white2_fill_grid(state.s, out, opts.ox or 0, opts.oy or 0, w, h)
   if opts.ops then
     local chain = vnoise.compile_ops(opts.ops)
     lib.vnoise_map_buffer(out, w * h, chain.ops, chain.n, opts.clamp == false and 0 or 1)

@@ -36,6 +36,11 @@ VNOISE_API float simplex3_eval(const noise_state_t* s, float x, float y, float z
 VNOISE_API float white2_eval(const noise_state_t* s, int ix, int iy);
 VNOISE_API float white3_eval(const noise_state_t* s, int ix, int iy, int iz);
 
+/* Fills out[j * w + i] with white2_eval(s, ox + i, oy + j) for a w x h block
+ * of integer cells (bit-identical to the per-cell call, one hash per value). */
+VNOISE_API void white2_fill_grid(const noise_state_t* s, float* out,
+                                 int ox, int oy, int w, int h);
+
 VNOISE_API float fbm2_eval(const noise_state_t* s, int base,
                            float x, float y, int octaves,
                            float lacunarity, float gain);

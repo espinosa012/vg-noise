@@ -41,6 +41,9 @@ the inner loop and the FFI overhead is amortized to zero per pixel.
 
 - `vnoise.fill_grid(state, kind, opts)` — fills a `float[w*h]` buffer
   (2D) or `float[w*h*d]` (3D) with fBm / Ridge / Turbulence output.
+- `vnoise.fill_white(state, opts)` — fills a `float[w*h]` buffer with
+  seeded white noise over integer cells (`state:white2(ox + i, oy + j)`),
+  e.g. per-cell random values for procedural placement.
 - `vnoise.fill_imagedata(state, kind, img, opts)` — writes directly to
   the raw RGBA8 pointer of a `love.image.ImageData`, remapping the noise
   range `[lo, hi]` to `[0, 255]` with clamping. Ready to upload to the
@@ -219,6 +222,7 @@ returns a Lua wrapper object. Garbage-collected by LuaJIT.
 vnoise.fill_grid(state, kind, opts) -> float* cdata
 vnoise.fill_volume(state, kind, opts) -> float* cdata
 vnoise.fill_imagedata(state, kind, img, opts) -> img
+vnoise.fill_white(state, opts) -> float* cdata   -- w, h, ox, oy (integer cells), out, ops, clamp
 ```
 
 Where `kind` is one of `"fbm"`, `"ridge"`, `"turb"`.
@@ -257,6 +261,7 @@ float simplex2_eval(const noise_state_t*, float x, float y);
 float simplex3_eval(const noise_state_t*, float x, float y, float z);
 float white2_eval  (const noise_state_t*, int ix, int iy);
 float white3_eval  (const noise_state_t*, int ix, int iy, int iz);
+void  white2_fill_grid(const noise_state_t*, float* out, int ox, int oy, int w, int h);
 
 float fbm2_eval   (const noise_state_t*, int base, float x, float y,
                    int octaves, float lac, float gain);

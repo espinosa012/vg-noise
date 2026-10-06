@@ -141,6 +141,39 @@ for _, kind in ipairs({ "fbm", "ridge", "turb" }) do
   ok(kind .. ": image ops match grid ops", match)
 end
 
+-- Seeded white-noise grid fill (spec: noise-white-fill)
+do
+  local s1 = vnoise.new(1)
+  local grid = vnoise.fill_white(s1, { w = 16, h = 16, ox = 100, oy = 200 })
+  local match = true
+  for j = 0, 15 do
+    for i = 0, 15 do
+      if grid[j * 16 + i] ~= s1:white2(100 + i, 200 + j) then
+        match = false
+      end
+    end
+  end
+  ok("white fill matches white2 per cell", match)
+  local other = vnoise.fill_white(vnoise.new(2), { w = 16, h = 16, ox = 100, oy = 200 })
+  local differs = false
+  for i = 0, 255 do
+    if other[i] ~= grid[i] then
+      differs = true
+    end
+  end
+  ok("white fill depends on the seed", differs)
+  local neg = vnoise.fill_white(s1, { w = 4, h = 1, ox = -2, oy = -7 })
+  ok("white fill negative origin", neg[0] == s1:white2(-2, -7) and neg[3] == s1:white2(1, -7))
+  local mapped = vnoise.fill_white(s1, { w = 16, h = 16, ox = 100, oy = 200, ops = { { "remap", -1, 1 } } })
+  local in_range = true
+  for i = 0, 255 do
+    if mapped[i] < 0 or mapped[i] > 1 or math.abs(mapped[i] - (grid[i] + 1) / 2) > 1e-6 then
+      in_range = false
+    end
+  end
+  ok("white fill ops remap to 0..1", in_range)
+end
+
 if failures > 0 then
   print(failures .. " failure(s)")
   os.exit(1)
