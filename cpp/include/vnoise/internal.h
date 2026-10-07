@@ -48,7 +48,8 @@ void seed_rng(unsigned long long seed, unsigned long long* sm,
 
 // Applies an op chain to one value (see VNOISE_OP_* in vnoise.h). Ops run in
 // order on unclamped values; only the final result is clamped when asked.
-inline float apply_ops(float v, const vnoise_op_t* ops, int n, int clamp01) {
+inline float apply_ops(float v, const vnoise_op_t* ops, int n, const float* data,
+                       int clamp01) {
     for (int k = 0; k < n; ++k) {
         const vnoise_op_t& o = ops[k];
         switch (o.op) {
@@ -69,6 +70,24 @@ inline float apply_ops(float v, const vnoise_op_t* ops, int n, int clamp01) {
         case VNOISE_OP_CONTRAST:
             v = (v - o.p[1]) * o.p[0] + o.p[1];
             break;
+        case VNOISE_OP_LUT: {
+            if (!data) break;
+            int count = (int)o.p[1];
+            if (count < 1) break;
+            const float* t = data + (int)o.p[0];
+            if (count == 1) {
+                v = t[0];
+                break;
+            }
+            // Clamp to [0, 1]; the negated test also sends NaN to 0.
+            float x = v;
+            if (!(x > 0.0f)) x = 0.0f; else if (x > 1.0f) x = 1.0f;
+            float f = x * (float)(count - 1);
+            int i = (int)f;
+            if (i > count - 2) i = count - 2;
+            v = t[i] + (t[i + 1] - t[i]) * (f - (float)i);
+            break;
+        }
         default:
             break;
         }

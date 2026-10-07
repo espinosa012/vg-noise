@@ -61,11 +61,19 @@ only the final result is (optionally) clamped to `[0, 1]`.
 | `scale(k)` | `v * k` |
 | `offset(d)` | `v + d` |
 | `contrast(k, pivot)` | `(v - pivot) * k + pivot` |
+| `lut(table)` | `v` clamped to `[0, 1]`, then linear interpolation in a table of samples spread evenly over `[0, 1]` |
+
+`lut` makes any transfer function (curves, terraces, ...) one generic op:
+the caller samples the function into a table and the library interpolates
+it. Its error against the sampled function is only in the sample interval
+holding a kink, at most `|Δslope| / (4 · (count - 1))`.
 
 C: `vnoise_op_t { int op; float p[4]; }` with `VNOISE_OP_*` ids,
-`vnoise_apply_ops(v, ops, n, clamp01)`, `vnoise_map_buffer(buf, count,
-ops, n, clamp01)` and `*_fill_imagedata_ops_rgba8` (op chain instead of
-`lo`/`hi`). Unknown op ids leave the value unchanged.
+`vnoise_apply_ops(v, ops, n, data, clamp01)`, `vnoise_map_buffer(buf,
+count, ops, n, data, clamp01)` and `*_fill_imagedata_ops_rgba8` (op chain
+instead of `lo`/`hi`). `data` is a float pool that `VNOISE_OP_LUT` ops
+index into (`p[0]` = offset, `p[1]` = sample count; NULL when the chain has
+no table). Unknown op ids leave the value unchanged.
 
 Lua:
 
@@ -74,9 +82,12 @@ local chain = vnoise.compile_ops({ { "contrast", 1.8, 0.5 }, { "offset", -0.1 } 
 vnoise.fill_imagedata(state, "fbm", img, { lo = -0.8, hi = 0.8, ops = chain }) -- remap(lo, hi) is prepended
 vnoise.fill_grid(state, "fbm", { w = 64, h = 64, ops = { { "remap", -1, 1 }, { "scale", 0.5 } } }) -- clamp defaults to true
 vnoise.apply_ops(0.4, chain)                                                    -- one value
+vnoise.apply_ops(0.75, { { "lut", { 0, 0.2, 1 } } })                            -- 0.6
 ```
 
-`compile_ops` accepts names or ids and raises on unknown names; pass the
+`compile_ops` accepts names or ids and raises on unknown names. A `lut`
+entry is `{ "lut", values }` (Lua array) or `{ "lut", float_ptr, count }`;
+its samples are copied into the chain's pool (`chain.data`). Pass the
 compiled chain to avoid rebuilding it on every call. `make test` runs
 `tests/value_ops.lua` with LuaJIT.
 

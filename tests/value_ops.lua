@@ -118,19 +118,15 @@ for _, kind in ipairs({ "fbm", "ridge", "turb" }) do
   end
   cops.ops = { { "contrast", 1.7, 0.4 } }
   vnoise.fill_imagedata(s, kind, c, cops)
-  local grid = vnoise.fill_grid(
-    s,
-    kind,
-    {
-      w = 48,
-      h = 40,
-      freq = 0.05,
-      ox = 3,
-      oy = -2,
-      octaves = 5,
-      ops = { { "remap", -0.6, 0.7 }, { "contrast", 1.7, 0.4 } },
-    }
-  )
+  local grid = vnoise.fill_grid(s, kind, {
+    w = 48,
+    h = 40,
+    freq = 0.05,
+    ox = 3,
+    oy = -2,
+    octaves = 5,
+    ops = { { "remap", -0.6, 0.7 }, { "contrast", 1.7, 0.4 } },
+  })
   local match = true
   for i = 0, 48 * 40 - 1 do
     if c.buf[i * 4] ~= math.floor(255 * grid[i]) and c.buf[i * 4] ~= math.floor(255 * grid[i] + 0.5) then
@@ -139,6 +135,64 @@ for _, kind in ipairs({ "fbm", "ridge", "turb" }) do
     end
   end
   ok(kind .. ": image ops match grid ops", match)
+end
+
+-- Look-up table op (spec: noise-value-ops, "Look-up table operation")
+do
+  local ramp = { 0, 0.2, 1 } -- samples at x = 0, 0.5, 1
+  ok("lut endpoints", near(apply(0, { { "lut", ramp } }, false), 0) and near(apply(1, { { "lut", ramp } }, false), 1))
+  ok("lut sample", near(apply(0.5, { { "lut", ramp } }, false), 0.2))
+  ok("lut interpolates", near(apply(0.75, { { "lut", ramp } }, false), 0.6))
+  ok("lut flat below", near(apply(-0.4, { { "lut", ramp } }, false), 0))
+  ok("lut flat above", near(apply(1.6, { { "lut", ramp } }, false), 1))
+  ok("lut NaN goes to first sample", near(apply(0 / 0, { { "lut", { 0.3, 0.9 } } }, false), 0.3))
+  ok("lut single sample is constant", near(apply(0.7, { { "lut", { 0.25 } } }, false), 0.25))
+  ok("lut id accepted", near(apply(0.5, { { vnoise.OP_LUT, { 0, 1 } } }, false), 0.5))
+  local empty_ok = pcall(vnoise.compile_ops, { { "lut", {} } })
+  ok("lut without samples raises", not empty_ok)
+
+  local two = vnoise.compile_ops({ { "lut", { 1, 0 } }, { "lut", { 0, 0.5, 0.5, 1 } } })
+  ok("two tables share one pool", two.data_n == 6)
+  -- 0.25 -> 0.75 (first, inverted) -> second table at 0.75: between 0.5 and 1.
+  ok("two tables in order", near(apply(0.25, two, false), 0.625))
+
+  local mixed = { { "scale", 2 }, { "lut", { 0, 1 } }, { "offset", -0.25 } }
+  ok("lut mixed with scalar ops", near(apply(0.3, mixed, false), 0.35))
+  ok("lut clamps its input, not the chain", near(apply(0.8, mixed, false), 0.75))
+
+  local ptr = ffi.new("float[3]", { 0, 0.2, 1 })
+  ok("lut from a float pointer", near(apply(0.75, { { "lut", ptr, 3 } }, false), 0.6))
+
+  local list = { { "remap", -1, 1 }, { "lut", { 0, 0.1, 0.9, 1 } } }
+  local raw = vnoise.fill_grid(s, "fbm", { w = w, h = h, freq = 0.07 })
+  local mapped = vnoise.fill_grid(s, "fbm", { w = w, h = h, freq = 0.07, ops = list })
+  local same = true
+  for i = 0, w * h - 1 do
+    if mapped[i] ~= apply(raw[i], list) then
+      same = false
+      break
+    end
+  end
+  ok("lut map buffer equals per-value", same)
+
+  local img = fake_image(48, 40)
+  local lut = { 0, 0.1, 0.9, 1 }
+  vnoise.fill_imagedata(s, "fbm", img, { freq = 0.05, lo = -0.6, hi = 0.7, octaves = 5, ops = { { "lut", lut } } })
+  local grid = vnoise.fill_grid(s, "fbm", {
+    w = 48,
+    h = 40,
+    freq = 0.05,
+    octaves = 5,
+    ops = { { "remap", -0.6, 0.7 }, { "lut", lut } },
+  })
+  local match = true
+  for i = 0, 48 * 40 - 1 do
+    if img.buf[i * 4] ~= math.floor(255 * grid[i]) and img.buf[i * 4] ~= math.floor(255 * grid[i] + 0.5) then
+      match = false
+      break
+    end
+  end
+  ok("lut image fill matches grid", match)
 end
 
 -- Seeded white-noise grid fill (spec: noise-white-fill)

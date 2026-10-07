@@ -114,12 +114,22 @@ VNOISE_API void turb2_fill_imagedata_rgba8(const noise_state_t* s, int base,
  *   SCALE    v * p[0]
  *   OFFSET   v + p[0]
  *   CONTRAST (v - p[1]) * p[0] + p[1]     (factor p[0] around pivot p[1])
+ *   LUT      look-up table of p[1] samples starting at data[p[0]], spread
+ *            evenly over [0, 1]: v is clamped to [0, 1] and interpolated
+ *            linearly between the two neighboring samples (a table with a
+ *            single sample is constant). Offsets and counts are integers
+ *            stored as floats (exact below 2^24).
  * Ops run in array order on unclamped values; only the final result is
- * optionally clamped to [0, 1]. Unknown op ids leave the value unchanged. */
+ * optionally clamped to [0, 1]. Unknown op ids leave the value unchanged,
+ * and so does a LUT op when data is NULL.
+ *
+ * `data` is the float pool that LUT ops index into (NULL when the chain has
+ * no LUT op). */
 #define VNOISE_OP_REMAP    0
 #define VNOISE_OP_SCALE    1
 #define VNOISE_OP_OFFSET   2
 #define VNOISE_OP_CONTRAST 3
+#define VNOISE_OP_LUT      4
 
 typedef struct {
     int op;
@@ -127,31 +137,32 @@ typedef struct {
 } vnoise_op_t;
 
 VNOISE_API float vnoise_apply_ops(float v, const vnoise_op_t* ops, int n,
-                                  int clamp01);
+                                  const float* data, int clamp01);
 VNOISE_API void vnoise_map_buffer(float* buf, int count,
-                                  const vnoise_op_t* ops, int n, int clamp01);
+                                  const vnoise_op_t* ops, int n,
+                                  const float* data, int clamp01);
 
 /* Like *_fill_imagedata_rgba8, but each pixel is t = clamp01(chain(noise))
- * with the op chain (ops, n) in place of the lo/hi range. */
+ * with the op chain (ops, n, data) in place of the lo/hi range. */
 VNOISE_API void fbm2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
                                               unsigned char* out, int w, int h,
                                               float ox, float oy, float freq,
                                               int octaves, float lac, float gain,
-                                              const vnoise_op_t* ops, int n,
+                                              const vnoise_op_t* ops, int n, const float* data,
                                               unsigned char r, unsigned char g,
                                               unsigned char b, unsigned char a);
 VNOISE_API void ridge2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
                                                 unsigned char* out, int w, int h,
                                                 float ox, float oy, float freq,
                                                 int octaves, float lac, float gain,
-                                                const vnoise_op_t* ops, int n,
+                                                const vnoise_op_t* ops, int n, const float* data,
                                                 unsigned char r, unsigned char g,
                                                 unsigned char b, unsigned char a);
 VNOISE_API void turb2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
                                                unsigned char* out, int w, int h,
                                                float ox, float oy, float freq,
                                                int octaves, float lac, float gain,
-                                               const vnoise_op_t* ops, int n,
+                                               const vnoise_op_t* ops, int n, const float* data,
                                                unsigned char r, unsigned char g,
                                                unsigned char b, unsigned char a);
 

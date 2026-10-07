@@ -1,8 +1,5 @@
-# noise-value-ops Specification
+## MODIFIED Requirements
 
-## Purpose
-Define the native value operations (remap, scale, offset, contrast, look-up table) applied to noise values in an ordered chain with a single optional final clamp, and how the C API and the Lua binding expose them.
-## Requirements
 ### Requirement: Value operation set
 The library SHALL define a value operation as `vnoise_op_t { int op; float p[4]; }` and SHALL implement these ops, applied to a value `v`:
 - `VNOISE_OP_REMAP` (0): `(v - p[0]) / (p[1] - p[0])`; when `p[1] == p[0]` the result is `0`.
@@ -35,21 +32,6 @@ An unknown op id SHALL leave the value unchanged. Unused `p` entries SHALL be ig
 #### Scenario: Look-up table
 - **WHEN** `lut([0, 0.2, 1])` is applied to `0.75`, `-0.4` and `1.6`
 - **THEN** the results are `0.6`, `0` and `1`
-
-### Requirement: Ordered chain with a single final clamp
-The library SHALL apply a chain of `n` ops in array order, feeding each op the previous result, with no intermediate clamping. When `clamp01` is non-zero the final result SHALL be clamped to `[0, 1]`; otherwise it SHALL be returned unclamped. An empty chain SHALL return the input (clamped if requested).
-
-#### Scenario: Order matters
-- **WHEN** the chain `[scale(2), offset(-0.5)]` and the chain `[offset(-0.5), scale(2)]` are applied to `0.4` without clamp
-- **THEN** the results are `0.3` and `-0.2`
-
-#### Scenario: No intermediate clamp
-- **WHEN** the chain `[scale(2), offset(-0.5)]` is applied to `0.8` with clamp
-- **THEN** the result is `1.0` (1.6 then 1.1, clamped once), not `0.5`
-
-#### Scenario: Unclamped output
-- **WHEN** the chain `[scale(3)]` is applied to `0.5` with `clamp01 = 0`
-- **THEN** the result is `1.5`
 
 ### Requirement: Single value and buffer application
 The library SHALL export `float vnoise_apply_ops(float v, const vnoise_op_t* ops, int n, const float* data, int clamp01)` and `void vnoise_map_buffer(float* buf, int count, const vnoise_op_t* ops, int n, const float* data, int clamp01)`, where `data` is the float pool for LUT ops (may be NULL); the latter SHALL replace every element of `buf` with the chain applied to it. Both SHALL tolerate `ops == NULL` with `n == 0`, and `vnoise_map_buffer` SHALL do nothing for a NULL buffer or `count <= 0`.
@@ -91,4 +73,3 @@ The Lua binding SHALL expose `vnoise.OP_REMAP`, `OP_SCALE`, `OP_OFFSET`, `OP_CON
 #### Scenario: Several tables in one chain
 - **WHEN** `compile_ops({ {"lut", {1, 0}}, {"lut", {0, 0.5, 0.5, 1}} })` is applied to `0.25`
 - **THEN** the pool holds 6 samples and the result is `0.625`
-
