@@ -62,6 +62,12 @@ only the final result is (optionally) clamped to `[0, 1]`.
 | `offset(d)` | `v + d` |
 | `contrast(k, pivot)` | `(v - pivot) * k + pivot` |
 | `lut(table)` | `v` clamped to `[0, 1]`, then linear interpolation in a table of samples spread evenly over `[0, 1]` |
+| `invert()` | `1 - v` |
+| `threshold(t)` | `v >= t ? 1 : 0` (binarization) |
+| `smoothstep(e0, e1)` | Hermite step from `e0` to `e1` (a threshold when `e0 == e1`) |
+| `gamma(g)` | `max(v, 0) ^ g` |
+| `quantize(n)` | `n >= 2` levels: `min(floor(clamp01(v) * n), n - 1) / (n - 1)` |
+| `clamp(lo, hi)` | explicit intermediate clamp |
 
 `lut` makes any transfer function (curves, terraces, ...) one generic op:
 the caller samples the function into a table and the library interpolates
@@ -90,6 +96,78 @@ entry is `{ "lut", values }` (Lua array) or `{ "lut", float_ptr, count }`;
 its samples are copied into the chain's pool (`chain.data`). Pass the
 compiled chain to avoid rebuilding it on every call. `make test` runs
 `tests/value_ops.lua` with LuaJIT.
+
+### Image processing (domain, kernels, masks, pipelines)
+
+A block of noise values can be processed as a grayscale image (0..1 by
+convention, unclamped between stages) while keeping the property that makes
+chunked worlds possible: **a cell's value depends only on its absolute cell
+index**, never on the block it was computed in. Evaluating a region in one
+call or as any tiling of blocks gives the same values (up to float rounding).
+
+- **Domain transforms** move the sample point instead of resampling pixels,
+  so they are exact: rotation, scaling, mirroring and translation about a
+  pivot (an affine map in cell space) plus optional fBm domain warping.
+  C: `vnoise_domain_t`, `vnoise_fill_domain` (cells by absolute index);
+  Lua: `vnoise.compile_domain(spec)`, `vnoise.fill_domain(state, kind, opts)`.
+- **Neighborhood kernels** work in *valid* mode: an `sw x sh` input gives
+  `(sw - 2R) x (sh - 2R)`, `R` the kernel's border radius, and nothing outside
+  the input is read. C: `vnoise_convolve` (full kernel), `vnoise_convolve_sep`,
+  `vnoise_sobel` (magnitude / x / y, divided by 4 so a 0 -> 1 step gives 1),
+  `vnoise_morph` (erode, dilate, open, close, gradient, top-hat, black-hat;
+  square or disc element; binary morphology on 0/1 images) with
+  `vnoise_morph_radius`, `vnoise_median`, `vnoise_distance` (bounded distance
+  field to cells `>= t`).
+- **Masks** restrict a stage to a region: rectangle, ellipse, polygon (absolute
+  cell coordinates) or a value range on the stage input, with optional
+  `feather` (fade inside the boundary) and `invert`. The stage result is
+  `before + m * (after - before)`. C: `vnoise_mask_t`, `vnoise_mask_blend`.
+- **Pipelines** tie it together. `fill_pipeline` samples the block grown by the
+  pipeline's total radius (the apron), runs the stages shrinking the buffer,
+  and clamps the final values unless `clamp = false`. Consecutive unmasked
+  point ops run as one fused chain.
+
+```lua
+local p = vnoise.compile_pipeline({
+  domain = { rotate = 30, scale = 2, pivot = { 128, 128 }, warp = { amp = 8, freq = 0.02, octaves = 3 } },
+  stages = {
+    { "remap", -1, 1 },
+    { "gaussian", 1.5 },                   -- radius ceil(3 sigma) = 5
+    { "threshold", 0.55 },
+    { "open", 1, shape = "disc" },         -- radius 2
+    { "invert", mask = { "ellipse", 128, 128, 60, 40, feather = 10 } },
+  },
+})
+-- Cells (c0 .. c0 + 63, r0 .. r0 + 63); cell (c, r) samples (ox + c' * freq, oy + r' * freq).
+local buf = vnoise.fill_pipeline(state, "fbm", p, { c0 = 64, r0 = 0, w = 64, h = 64, freq = 0.01, octaves = 6 })
+```
+
+| Stage | Parameters | Radius |
+|-------|------------|--------|
+| point ops | as in `compile_ops` | 0 |
+| `convolve` | `kernel` (flat or nested odd square table, correlation) | `(side - 1) / 2` |
+| `blur` | `r` (box) | `r` |
+| `gaussian` | `sigma` | `ceil(3 sigma)` |
+| `sharpen`, `emboss`, `laplacian` | `k` (default 1) | 1 |
+| `sobel`, `sobel_x`, `sobel_y` | `k` (default 1) | 1 |
+| `erode`, `dilate`, `morph_gradient` | `r`, `shape` (`"square"`, `"disc"`) | `r` |
+| `open`, `close`, `tophat`, `blackhat` | `r`, `shape` | `2r` |
+| `median` | `r` (at most 7) | `r` |
+| `distance` | `r`, `t` (default 0.5); `min(d, r) / r` | `r` |
+
+Radii are integers up to 32. The apron multiplies the sampled area by
+`((w + 2R) / w)^2`; measured on a 64 x 64 block (6 octaves, Apple M-series):
+0.28 ms raw, 0.33 ms with Gaussian 1.5 + threshold, 0.36 ms with open 2 (disc)
++ Sobel, 2.4 ms with domain warp + median 2 + distance 8 (warping costs two
+extra fBm samples per cell).
+
+Statistics over the whole image (normalization, histogram equalization,
+Otsu) are not block independent, so they are resolved once on a probe buffer
+of your choice into point ops: `vnoise.histogram(buf, count, bins, lo, hi)`,
+`vnoise.otsu(hist, lo, hi)` (value for a `threshold` stage) and
+`vnoise.equalize_lut(hist, size)` (samples for a `lut` stage). Operations that
+are inherently global (connected components, unbounded distances) are not
+provided.
 
 ### Determinism
 
@@ -318,8 +396,8 @@ void ridge2_fill_imagedata_rgba8(...);
 void turb2_fill_imagedata_rgba8 (...);
 ```
 
-Inspection: `nm -gU libvnoise.<ext>` shows exactly 22 exported
-unmangled C symbols — no internal C++ symbols leak across the ABI
+Inspection: `nm -gU libvnoise.<ext>` shows only the exported
+unmangled C symbols of `vnoise.h` — no internal C++ symbols leak across the ABI
 boundary (thanks to `-fvisibility=hidden` + `VNOISE_API`).
 
 ## Project structure
@@ -340,12 +418,19 @@ cpp/
   src/fractal.cpp             Ridge 2D/3D + Turbulence 2D/3D
   src/fill_grid.cpp           Batch fill_grid (2D) + fill_volume (3D)
   src/fill_imagedata.cpp      Batch fill_imagedata_rgba8 (2D)
+  src/value_ops.cpp           Value-op chains over values and buffers
+  src/domain.cpp              Absolute-cell sampling through a domain transform
+  src/kernels.cpp             Valid-mode kernels (convolution, Sobel, morphology,
+                              median, distance)
+  src/mask.cpp                Region masks and mask blending
 lua/vnoise.lua                LuaJIT FFI binding + ergonomic wrappers
 examples/love2d/conf.lua      Love2D config (1024x768 window)
 examples/love2d/main.lua      Demo: texture + isometric mesh
 tests/smoke.lua              18 luajit checks (range, determinism,
                               batch==per-point, clamping, invalid base)
 tests/determinism.lua        Bit-identity cross-run + clamping
+tests/value_ops.lua          Value-op chains (make test)
+tests/image_ops.lua          Domain, kernels, masks, pipelines (make test)
 Makefile                     Cross-platform build, no CMake
 README.md                    This file
 ```

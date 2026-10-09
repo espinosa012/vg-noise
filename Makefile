@@ -39,3 +39,4 @@ clean:
 
 test: $(TARGET)
 	luajit tests/value_ops.lua
+	luajit tests/image_ops.lua

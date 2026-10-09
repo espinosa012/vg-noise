@@ -88,6 +88,40 @@ inline float apply_ops(float v, const vnoise_op_t* ops, int n, const float* data
             v = t[i] + (t[i + 1] - t[i]) * (f - (float)i);
             break;
         }
+        case VNOISE_OP_INVERT:
+            v = 1.0f - v;
+            break;
+        case VNOISE_OP_THRESHOLD:
+            v = v >= o.p[0] ? 1.0f : 0.0f;
+            break;
+        case VNOISE_OP_SMOOTHSTEP: {
+            float range = o.p[1] - o.p[0];
+            if (range == 0.0f) {
+                v = v >= o.p[0] ? 1.0f : 0.0f;
+                break;
+            }
+            float t = (v - o.p[0]) / range;
+            if (!(t > 0.0f)) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+            v = t * t * (3.0f - 2.0f * t);
+            break;
+        }
+        case VNOISE_OP_GAMMA:
+            v = v > 0.0f ? powf(v, o.p[0]) : 0.0f;
+            break;
+        case VNOISE_OP_QUANTIZE: {
+            float n = floorf(o.p[0]);
+            if (!(n >= 2.0f)) break;
+            float x = v;
+            if (!(x > 0.0f)) x = 0.0f; else if (x > 1.0f) x = 1.0f;
+            float q = floorf(x * n);
+            if (q > n - 1.0f) q = n - 1.0f;
+            v = q / (n - 1.0f);
+            break;
+        }
+        case VNOISE_OP_CLAMP:
+            if (v < o.p[0]) v = o.p[0];
+            if (v > o.p[1]) v = o.p[1];
+            break;
         default:
             break;
         }
