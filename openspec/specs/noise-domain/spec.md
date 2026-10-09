@@ -15,7 +15,7 @@ The library SHALL export `void vnoise_fill_domain(const noise_state_t* s, int ba
 - **THEN** the shared cells have the same values within 1e-5
 
 ### Requirement: Domain description in Lua
-The Lua binding SHALL provide `vnoise.compile_domain(spec)` returning a `vnoise_domain_t` from `{ rotate = degrees, scale = s | {sx, sy}, flip_x, flip_y, translate = {tx, ty}, pivot = {px, py}, warp = { amp, freq, octaves, base } }` (all optional) as the inverse map `c' = pivot + M (c - translate - pivot)`, `M` the inverse of mirroring, scaling and rotating the image about the pivot. A scale of 0 SHALL raise an error.
+The Lua binding SHALL provide `vnoise.compile_domain(spec)` returning a `vnoise_domain_t` from `{ rotate = degrees, scale = s | {sx, sy}, flip_x, flip_y, translate = {tx, ty}, pivot = {px, py}, warp = { amp, freq, octaves, base } }` (all optional) as the inverse map `c' = pivot + M (c - translate - pivot)`, `M` the inverse of mirroring, scaling and rotating the image about the pivot. A scale of 0 SHALL raise an error. `vnoise.domain_affine(spec)` SHALL return the same map as six numbers `{ a, b, c, d, e, f }` (`c' = a c + b r + c`, `r' = d c + e r + f`), and `compile_domain` SHALL accept `affine = { ... }` (six numbers, else an error) in place of the transform fields, so callers can compose the map with their own cell mapping.
 
 #### Scenario: Quarter turn
 - **WHEN** a block is filled with `rotate = 90` about pivot `(0, 0)` and another without rotation
@@ -29,3 +29,6 @@ The Lua binding SHALL provide `vnoise.compile_domain(spec)` returning a `vnoise_
 - **WHEN** a block is filled with `flip_x = true` about pivot `(10, 0)`, and another with `translate = {3, -2}`
 - **THEN** cell `(c, r)` of the first equals unmirrored cell `(20 - c, r)`, and cell `(c, r)` of the second equals untranslated cell `(c - 3, r + 2)`
 
+#### Scenario: Explicit affine
+- **WHEN** a block is filled with `affine = vnoise.domain_affine(spec)` and another with `spec`
+- **THEN** both blocks are identical

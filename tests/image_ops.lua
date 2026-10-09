@@ -147,6 +147,28 @@ do
   )
   ok("zero scale raises", not pcall(vnoise.compile_domain, { scale = 0 }))
 
+  local spec = { rotate = 33, scale = { 1.5, 0.7 }, flip_y = true, pivot = { 4, -2 }, translate = { 1, 2 } }
+  local by_spec = domainBlock(spec, -6, -6, 12, 12)
+  local by_affine = domainBlock({ affine = vnoise.domain_affine(spec) }, -6, -6, 12, 12)
+  ok(
+    "explicit affine equals the description",
+    all(by_spec, 12, 12, function(i, j, v)
+      return v == by_affine[j * 12 + i]
+    end)
+  )
+  -- Pixel p shows cell 2p + 5: compose the map with that and sample pixels.
+  local m = vnoise.domain_affine(spec)
+  local composed = { 2 * m[1], 2 * m[2], 5 * m[1] + 5 * m[2] + m[3], 2 * m[4], 2 * m[5], 5 * m[4] + 5 * m[5] + m[6] }
+  local pixels = domainBlock({ affine = composed }, 0, 0, 6, 6)
+  local cells = domainBlock(spec, 5, 5, 12, 12)
+  ok(
+    "composed affine samples every other cell",
+    all(pixels, 6, 6, function(i, j, v)
+      return near(v, cells[(2 * j) * 12 + 2 * i])
+    end)
+  )
+  ok("affine needs six numbers", not pcall(vnoise.compile_domain, { affine = { 1, 0, 0 } }))
+
   local dom = { rotate = 37, scale = { 1.5, 0.8 }, pivot = { 7, 3 }, warp = { amp = 6, freq = 0.08, octaves = 2 } }
   local big = domainBlock(dom, 0, 0, 40, 40)
   local small = domainBlock(dom, 17, 9, 20, 20)

@@ -538,14 +538,53 @@ end
 -- sample cell, `c' = pivot + M (c - translate - pivot)`. `warp = { amp, freq,
 -- octaves, base }` (or named fields) adds fBm domain warping of `amp` cells
 -- with a warp field of `freq` noise units per cell (defaults 0.05, 3 octaves,
--- simplex). The sample origin and frequency (`ox`, `oy`, `freq`) are set per
--- fill. A compiled domain is returned unchanged.
+-- simplex). `affine = { a, b, c, d, e, f }` gives the cell map directly
+-- (`c' = a c + b r + c0`, `r' = d c + e r + f`) instead of the transform
+-- fields, e.g. to compose it with a caller's own pixel-to-cell map (see
+-- `domain_affine`). The sample origin and frequency (`ox`, `oy`, `freq`) are
+-- set per fill. A compiled domain is returned unchanged.
 -- @param spec table|nil The domain description (nil = identity).
 -- @return table The compiled domain `{ d = vnoise_domain_t }`.
 function vnoise.compile_domain(spec)
   if getmetatable(spec) == Domain then
     return spec
   end
+  spec = spec or {}
+  local d = ffi.new("vnoise_domain_t")
+  if spec.affine then
+    -- Explicit map from output cell to sample cell (used by callers that
+    -- compose the transform with their own pixel-to-cell mapping).
+    local a = spec.affine
+    for i = 1, 6 do
+      if type(a[i]) ~= "number" then
+        error("vnoise: domain affine needs six numbers", 2)
+      end
+      d.m[i - 1] = a[i]
+    end
+  else
+    local m = vnoise.domain_affine(spec)
+    for i = 1, 6 do
+      d.m[i - 1] = m[i]
+    end
+  end
+  d.ox, d.oy, d.freq = 0, 0, 1
+  local warp = spec.warp
+  if warp then
+    d.warp_amp = warp.amp or warp[1] or 0
+    d.warp_freq = warp.freq or warp[2] or 0.05
+    d.warp_octaves = warp.octaves or warp[3] or 3
+    d.warp_base = warp.base or warp[4] or vnoise.BASE_SIMPLEX2
+  end
+  return setmetatable({ d = d }, Domain)
+end
+
+--- Returns the affine map from output cell to sample cell of a domain
+-- description (`rotate`, `scale`, `flip_x`, `flip_y`, `translate`, `pivot`;
+-- see `compile_domain`) as six numbers `{ a, b, c, d, e, f }`:
+-- `c' = a c + b r + c0`, `r' = d c + e r + f`. A scale of 0 raises an error.
+-- @param spec table|nil The domain description (nil = identity).
+-- @return table The six coefficients.
+function vnoise.domain_affine(spec)
   spec = spec or {}
   local sx, sy = pair(spec.scale, 1)
   if sx == 0 or sy == 0 then
@@ -560,18 +599,7 @@ function vnoise.compile_domain(spec)
   -- M = F * diag(1/sx, 1/sy) * R(-angle), R(-a) = [cos, sin; -sin, cos].
   local a, b = fx * cs / sx, fx * sn / sx
   local c, e = -fy * sn / sy, fy * cs / sy
-  local d = ffi.new("vnoise_domain_t")
-  d.m[0], d.m[1], d.m[2] = a, b, px - a * (tx + px) - b * (ty + py)
-  d.m[3], d.m[4], d.m[5] = c, e, py - c * (tx + px) - e * (ty + py)
-  d.ox, d.oy, d.freq = 0, 0, 1
-  local warp = spec.warp
-  if warp then
-    d.warp_amp = warp.amp or warp[1] or 0
-    d.warp_freq = warp.freq or warp[2] or 0.05
-    d.warp_octaves = warp.octaves or warp[3] or 3
-    d.warp_base = warp.base or warp[4] or vnoise.BASE_SIMPLEX2
-  end
-  return setmetatable({ d = d }, Domain)
+  return { a, b, px - a * (tx + px) - b * (ty + py), c, e, py - c * (tx + px) - e * (ty + py) }
 end
 
 -- Copies a compiled domain with the per-fill origin and frequency.
