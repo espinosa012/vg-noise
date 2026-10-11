@@ -30,10 +30,43 @@ inline float lerp(float a, float b, float t) {
     return a + t * (b - a);
 }
 
+// Integer hash of the cell coordinates mixed with a per-seed key, so each
+// seed yields an independent white-noise field.
+inline unsigned int hash4(unsigned int x, unsigned int y, unsigned int z, unsigned int k) {
+    unsigned int h = x * 374761393u + y * 668265263u + z * 2147483647u + k * 3266489917u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return h ^ (h >> 16);
+}
+
+// Derives a 32-bit key from the state's seed. noise_state_t keeps its layout
+// (it is mirrored by the Lua FFI cdef), so the key is recomputed per call;
+// it is a handful of integer ops.
+inline unsigned int seed_key(const noise_state_t* s) {
+    unsigned long long sm = s->seed;
+    return (unsigned int)(splitmix64(&sm) >> 32);
+}
+
+// Maps a hash to [0, 1) with 24 bits of precision.
+inline float hash_unit(unsigned int h) {
+    return (float)(h >> 8) * (1.0f / 16777216.0f);
+}
+
+// Maps absolute cell (c, r) through a domain (affine, then optional fBm warp)
+// to the noise sample point. Shared by vnoise_fill_domain and
+// vnoise_fill_sampler so both give bit-identical points.
+void domain_point(const noise_state_t* s, const vnoise_domain_t* d, float c, float r,
+                  float* x, float* y);
+
+// Per-octave domain offset shared by every fractal sum (see fbm.cpp).
+inline float octave_offset(int o, float k) {
+    return (float)o * k;
+}
+
 float grad2(int hash, float x, float y);
 float grad3(int hash, float x, float y, float z);
 
 float simplex2(const noise_state_t* s, float x, float y);
+float simplex2_grad(const noise_state_t* s, float x, float y, float* gx, float* gy);
 float simplex3(const noise_state_t* s, float x, float y, float z);
 
 float fbm_sample(const noise_state_t* s, int base, float x, float y,
@@ -42,6 +75,19 @@ float fbm_sample3(const noise_state_t* s, int base, float x, float y, float z,
                   int octaves, float lac, float gain, int mode);
 
 enum FractalMode { FBM = 0, RIDGE = 1, TURB = 2 };
+
+// 2D base noise with its analytic gradient (Perlin or Simplex; any other base
+// falls back to Simplex).
+float base2_deriv(const noise_state_t* s, int base, float x, float y, float* dx, float* dy);
+
+// Derivative-damped fBm (see VNOISE_MODE_DAMPED).
+float damped_sample(const noise_state_t* s, int base, float x, float y,
+                    int octaves, float lac, float gain, float damping);
+
+// Cellular noise of one octave and its fractal sum (see VNOISE_MODE_CELL_*).
+float cellular2(const noise_state_t* s, float x, float y, float jitter, int ret);
+float cellular_sample(const noise_state_t* s, float x, float y, int octaves,
+                      float lac, float gain, float jitter, int ret);
 
 void seed_rng(unsigned long long seed, unsigned long long* sm,
               unsigned int* xs);

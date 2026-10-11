@@ -96,4 +96,51 @@ VNOISE_API float perlin3_eval(const noise_state_t* s, float x, float y, float z)
         w);
 }
 
+
+// Gradient vectors matching grad2's eight cases.
+static const float PERLIN_G2[8][2] = {
+    { 1,  1}, { 1, -1}, {-1,  1}, {-1, -1}, { 1,  0}, {-1,  0}, { 0,  1}, { 0, -1}
+};
+
+// 2D Perlin noise with its analytic gradient: with corner values a, b, c, d
+// (bottom-left, bottom-right, top-left, top-right) and quintic weights u, v,
+// n = a + u (b - a) + v (c - a) + u v (a - b - c + d); the product rule gives
+// the gradient through u' = fade'(x) and v' = fade'(y).
+VNOISE_API float perlin2_deriv(const noise_state_t* s, float x, float y, float* dx, float* dy) {
+    if (!s) {
+        if (dx) *dx = 0;
+        if (dy) *dy = 0;
+        return 0;
+    }
+    int X = (int)floorf(x) & 255;
+    int Y = (int)floorf(y) & 255;
+    x -= floorf(x);
+    y -= floorf(y);
+    float u = vnoise::fade(x);
+    float v = vnoise::fade(y);
+    float du = 30.0f * x * x * (x * (x - 2.0f) + 1.0f);
+    float dv = 30.0f * y * y * (y * (y - 2.0f) + 1.0f);
+    const unsigned int* p = s->perm;
+    int A  = p[X]   + Y;
+    int AA = p[A];
+    int AB = p[A + 1];
+    int B  = p[X + 1] + Y;
+    int BA = p[B];
+    int BB = p[B + 1];
+    const float* ga = PERLIN_G2[p[AA] & 7];
+    const float* gb = PERLIN_G2[p[BA] & 7];
+    const float* gc = PERLIN_G2[p[AB] & 7];
+    const float* gd = PERLIN_G2[p[BB] & 7];
+    float a = vnoise::grad2((int)p[AA], x,     y);
+    float b = vnoise::grad2((int)p[BA], x - 1, y);
+    float c = vnoise::grad2((int)p[AB], x,     y - 1);
+    float d = vnoise::grad2((int)p[BB], x - 1, y - 1);
+    float k = a - b - c + d;
+    if (dx) *dx = ga[0] + u * (gb[0] - ga[0]) + v * (gc[0] - ga[0]) + u * v * (ga[0] - gb[0] - gc[0] + gd[0])
+                  + du * ((b - a) + v * k);
+    if (dy) *dy = ga[1] + u * (gb[1] - ga[1]) + v * (gc[1] - ga[1]) + u * v * (ga[1] - gb[1] - gc[1] + gd[1])
+                  + dv * ((c - a) + u * k);
+    return vnoise::lerp(vnoise::lerp(a, b, u), vnoise::lerp(c, d, u), v);
+}
+
 }

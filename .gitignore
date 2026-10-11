@@ -1,5 +1,6 @@
 # Build artifacts
 *.o
+*.d
 *.obj
 
 # Compiled shared libraries (in repo root and dist/)

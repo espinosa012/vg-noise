@@ -169,6 +169,97 @@ of your choice into point ops: `vnoise.histogram(buf, count, bins, lo, hi)`,
 are inherently global (connected components, unbounded distances) are not
 provided.
 
+### Terrain (topography)
+
+Building blocks for plausible elevation maps, keeping the library conventions:
+**every elevation and terrain output is in 0..1**, and a cell's value depends
+only on its absolute index, so terrain streams in chunks like any pipeline.
+
+**Samplers.** `vnoise.fill_sampler(state, spec, opts)` (C: `vnoise_sampler_t`,
+`vnoise_fill_sampler`) is one entry point for every 2D sampler mode, through a
+domain like `fill_domain`:
+
+| Kind | Values | Notes |
+|------|--------|-------|
+| `fbm`, `ridge`, `turb` | as `fill_domain` | bit-identical points |
+| `cell_f1`, `cell_f2`, `cell_edge`, `cell_value` | 0..1 | Worley noise: distance to the nearest / second-nearest feature point, their difference (0 on cell borders: ridge and crack networks) and a per-cell value; `jitter` 0..1, fractal sums average octaves |
+| `damped` | about -1..1 | fBm in which each octave is damped by `1 / (1 + damping ‖D‖²)`, `D` the running sum of gradients: steep areas lose fine detail (smooth valleys, rough peaks); `damping = 0` is fBm |
+
+`simplex2_deriv` and `perlin2_deriv` return the analytic gradient as well;
+`cellular2_eval(s, x, y, jitter, ret)` evaluates one cellular octave.
+
+**Source trees.** `vnoise.compile_source(spec)` / `vnoise.fill_source(state,
+source, opts)` combine several fields. Leaves are samplers (`{ "ridge", freq =
+1/200, octaves = 5, domain = ..., seed = 3, ops = ... }`, `seed` gives the leaf
+its own state), `{ "const", v }`, `{ "mask", <mask spec> }` (the weight of a
+pipeline mask), `{ "pipeline", <pipeline spec>, kind = ... }` and `{ "plan",
+plan, output = name }`; nodes are `add` (with `weights`), `mul`, `min`, `max`,
+`sub`, `abs`, `pow` and `lerp`, each with optional `ops`. `stride` samples
+every n-th cell (used for macro grids). A pipeline accepts `source = <tree>` in
+place of its single sampler (`fill_pipeline(state, nil, p, opts)`), so kernels,
+masks and curves run over any combination. `vnoise.presets.continent(opts)`
+and `vnoise.presets.mountain_belts(opts)` return ready-made trees in 0..1.
+
+**Gullies.** The pipeline stage `{ "gullies", scale = 8, strength = 0.05,
+octaves = 2, gain = 0.5, sharpness = 1 }` (radius 1) is an analytic erosion
+filter: on any input it adds stripes aligned with the downhill direction,
+stronger on steep slopes, absent on flat ground.
+
+**Terrain plan.** Rivers that run downhill from source to sea depend on the
+whole map, so they cannot come from local operations. A plan solves them once
+per world on a coarse grid; detail is added per block:
+
+```
+ elevation / uplift sources ─► macro grid (a node every macro_cell cells)
+   ─► stream-power erosion (implicit, uplift, hillslope diffusion)
+   ─► priority-flood ─► D8 receivers ─► flow accumulation ─► lakes
+   ─► river polylines (Chaikin-smoothed, width/bed from flow, bed never rises)
+   ─► bucket index of the segments
+ fill_terrain(block): Catmull-Rom macro height + detail ─► carved valleys
+   ─► elevation, river, lake, flow, channel_distance
+```
+
+```lua
+local s = vnoise.new(7)
+local belts = vnoise.presets.mountain_belts({ seed = 2, freq = 1 / 200, belt_freq = 1 / 1500 })
+local plan = vnoise.terrain_plan(s, {
+  width = 4096, height = 4096, macro_cell = 32, sea_level = 0.3,
+  elevation = { "add", vnoise.presets.continent({ width = 4096, height = 4096, seed = 1 }), belts,
+                weights = { 0.75, 0.35 }, ops = { { "clamp", 0, 1 } } },
+  uplift = belts,
+  rivers = { min_flow = 16, meander_amp = 5 },
+  detail = { source = { "damped", freq = 1 / 40, octaves = 5, damping = 2 }, amplitude = 0.02 },
+})
+local out = vnoise.fill_terrain(s, plan, { c0 = 1024, r0 = 512, w = 64, h = 64,
+                                          outputs = { "elevation", "river", "lake" } })
+for _, r in ipairs(plan:rivers()) do --[[ r.points, r.flow, r.width, r.bed, r.mouth ]] end
+local d, bed, width, flow, poly = plan:query(1100, 600) -- nearest river, or nil
+```
+
+| Output | Meaning (all 0..1) |
+|--------|--------------------|
+| `elevation` | macro height (no overshoot) + detail limited by the headroom `min(a, h, 1 - h)` + river valleys carved down to the bed (`valley_shape` < 1 U-shaped, > 1 V-shaped) |
+| `river` | 1 in the channel (`d <= width / 2`), fading over `bank` cells |
+| `lake` | lake nodes (filled depressions deeper than `lake_depth`) below their surface |
+| `flow` | `log(1 + A) / log(1 + A_max)`, the drainage area |
+| `channel_distance` | `min(d, distance_range) / distance_range` to the nearest channel |
+
+Options (defaults): `macro_cell` (64), `sea_level` (0), `outlets` (`"both"`,
+`"edges"`, `"sea"`); `erosion = { iterations (60), reroute (4), k (0.01), m
+(0.5), dt (1), uplift (0.002), diffusion (0.01) }`; `rivers = { min_flow (32
+nodes), width (2), max_width (24), depth (0.004), max_depth (0.03), lake_depth
+(0.002), smooth (2), valley (6), valley_min (8), valley_shape (1), bank (1),
+meander_amp (0), meander_freq (1/64), distance_range (64) }`; `detail = {
+source, amplitude (0.05), valley_damping (0.7) }`. `plan:grid(name)` copies a
+macro grid (`height`, `filled`, `flow`, `lake`, `receiver`, `outlet`). A plan
+output is also a source leaf, so pipelines (e.g. `gullies`) can post-process it.
+
+Cost (Apple M-series, `make`): a 257 x 257 node plan (16384 x 16384 cells at
+`macro_cell = 64`) with 100 erosion iterations builds in about 190 ms; a 64 x 64
+block with all five outputs and a 6-octave detail source fills in about 0.35
+ms. Memory grows with the nodes and river segments, never with the extent.
+Rivers exist only inside the plan's finite extent.
+
 ### Determinism
 
 - Same seed produces the **same output within the same build**
@@ -253,6 +344,7 @@ specific instruction set extensions.
 
 ```sh
 love examples/love2d
+love examples/terrain     # terrain plan preview: R new seed, 1-3 views, E erosion, M meanders
 ```
 
 Opens a 1024×768 window showing two things side by side:
@@ -423,14 +515,23 @@ cpp/
   src/kernels.cpp             Valid-mode kernels (convolution, Sobel, morphology,
                               median, distance)
   src/mask.cpp                Region masks and mask blending
+  src/cellular.cpp            Cellular (Worley) noise
+  src/sampler.cpp             Generic sampler entry point, damped fBm
+  src/sources.cpp             Buffer combinators for source trees
+  src/gullies.cpp             Gullies erosion filter stage
+  src/terrain_plan.h          Private terrain plan layout
+  src/terrain_plan.cpp        Plan build: erosion, drainage, rivers, index
+  src/terrain_fill.cpp        Per-block multi-output plan evaluation
 lua/vnoise.lua                LuaJIT FFI binding + ergonomic wrappers
 examples/love2d/conf.lua      Love2D config (1024x768 window)
 examples/love2d/main.lua      Demo: texture + isometric mesh
+examples/terrain/main.lua     Demo: terrain plan preview (erosion, rivers, lakes)
 tests/smoke.lua              18 luajit checks (range, determinism,
                               batch==per-point, clamping, invalid base)
 tests/determinism.lua        Bit-identity cross-run + clamping
 tests/value_ops.lua          Value-op chains (make test)
 tests/image_ops.lua          Domain, kernels, masks, pipelines (make test)
+tests/terrain.lua            Samplers, sources, gullies, terrain plans (make test)
 Makefile                     Cross-platform build, no CMake
 README.md                    This file
 ```

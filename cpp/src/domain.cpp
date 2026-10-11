@@ -31,3 +31,28 @@ extern "C" VNOISE_API void vnoise_fill_domain(const noise_state_t* s, int base, 
         }
     }
 }
+
+namespace vnoise {
+
+// Same mapping as the loop of vnoise_fill_domain, as a reusable function.
+// vnoise_fill_domain keeps its own inlined copy so its output is unchanged.
+void domain_point(const noise_state_t* s, const vnoise_domain_t* d, float c, float r,
+                  float* x, float* y) {
+    const float* m = d->m;
+    float cx = m[0] * c + m[1] * r + m[2];
+    float cy = m[3] * c + m[4] * r + m[5];
+    if (d->warp_amp != 0.0f) {
+        const float wx = cx * d->warp_freq;
+        const float wy = cy * d->warp_freq;
+        const float dx = fbm_sample(s, d->warp_base, wx + 5.2f, wy + 1.3f,
+                                    d->warp_octaves, 2.0f, 0.5f, FBM);
+        const float dy = fbm_sample(s, d->warp_base, wx + 1.7f, wy + 9.2f,
+                                    d->warp_octaves, 2.0f, 0.5f, FBM);
+        cx += d->warp_amp * dx;
+        cy += d->warp_amp * dy;
+    }
+    *x = d->ox + cx * d->freq;
+    *y = d->oy + cy * d->freq;
+}
+
+} // namespace vnoise

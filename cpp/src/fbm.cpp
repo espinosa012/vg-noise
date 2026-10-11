@@ -23,14 +23,6 @@ static inline float base3(const noise_state_t* s, int base,
     }
 }
 
-// Per-octave domain offset. Without it every octave samples the same field
-// from the same origin, so with integer lacunarity the lattices of all
-// octaves line up and the sum shows straight grid lines. The offsets are
-// small irrational-ish steps, keeping float precision intact.
-static inline float octave_offset(int o, float k) {
-    return (float)o * k;
-}
-
 float fbm_sample(const noise_state_t* s, int base, float x, float y,
                  int octaves, float lac, float gain, int mode) {
     if (!s || octaves <= 0) return 0.0f;

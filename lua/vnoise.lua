@@ -178,6 +178,63 @@ void vnoise_mask_blend(float* dst, int w, int h, const float* before, int before
                        int c0, int r0, const vnoise_mask_t* mask, const float* data);
 ]])
 
+ffi.cdef([[
+float perlin2_deriv(const noise_state_t* s, float x, float y, float* dx, float* dy);
+float simplex2_deriv(const noise_state_t* s, float x, float y, float* dx, float* dy);
+float cellular2_eval(const noise_state_t* s, float x, float y, float jitter, int ret);
+
+typedef struct {
+    int mode;
+    int base;
+    int octaves;
+    float lac, gain;
+    float jitter;
+    float damping;
+    float p[4];
+} vnoise_sampler_t;
+
+void vnoise_fill_sampler(const noise_state_t* s, const vnoise_sampler_t* sp,
+                         float* out, int c0, int r0, int w, int h, const vnoise_domain_t* d);
+void vnoise_combine(float* dst, const float* src, int count, int op, float w);
+void vnoise_combine_lerp(float* dst, const float* b, const float* t, int count);
+void vnoise_gullies(const float* src, int sw, int sh, float* dst, int c0, int r0,
+                    const noise_state_t* s, float scale, float strength, int octaves,
+                    float gain, float sharpness);
+
+typedef struct {
+    int width, height;
+    int macro_cell;
+    float sea_level;
+    int outlets;
+    unsigned long long seed;
+    int erosion_iterations;
+    int erosion_reroute;
+    float erosion_k, erosion_m, erosion_dt, erosion_uplift, erosion_diffusion;
+    float river_min_flow;
+    float river_width, river_max_width;
+    float river_depth, river_max_depth;
+    float lake_depth;
+    int river_smooth;
+    float valley, valley_min, valley_shape, bank;
+    float meander_amp, meander_freq;
+    float distance_range;
+    float detail_amplitude, detail_valley_damping;
+} vnoise_plan_params_t;
+
+typedef struct vnoise_plan vnoise_plan_t;
+
+vnoise_plan_t* vnoise_plan_create(const vnoise_plan_params_t* params, const float* height, const float* uplift);
+void vnoise_plan_destroy(vnoise_plan_t* plan);
+void vnoise_plan_info(const vnoise_plan_t* plan, int* mw, int* mh, int* polylines, int* vertices);
+void vnoise_plan_grid(const vnoise_plan_t* plan, int which, float* out);
+void vnoise_plan_rivers(const vnoise_plan_t* plan, int* start, int* count, int* mouth,
+                        float* x, float* y, float* flow, float* width, float* bed);
+int vnoise_plan_query(const vnoise_plan_t* plan, float c, float r, float* out);
+void vnoise_plan_fill(const vnoise_plan_t* plan, int c0, int r0, int w, int h,
+                      const float* detail, float* elevation, float* river,
+                      float* lake, float* flow, float* channel_distance);
+]])
+
 local vnoise = {
   BASE_PERLIN2 = 0,
   BASE_PERLIN3 = 1,
@@ -201,6 +258,17 @@ local vnoise = {
   MODE_FBM = 0,
   MODE_RIDGE = 1,
   MODE_TURB = 2,
+  -- Extra modes of fill_sampler.
+  MODE_CELL_F1 = 3,
+  MODE_CELL_F2 = 4,
+  MODE_CELL_EDGE = 5,
+  MODE_CELL_VALUE = 6,
+  MODE_DAMPED = 7,
+  -- cellular2_eval results.
+  CELL_F1 = 0,
+  CELL_F2 = 1,
+  CELL_EDGE = 2,
+  CELL_VALUE = 3,
   -- Morphology ops and structuring element shapes (vnoise_morph).
   MORPH_ERODE = 0,
   MORPH_DILATE = 1,
@@ -720,7 +788,8 @@ local function morphStage(op)
   end
 end
 
--- Kernel stages by name: builder(entry, name) -> { radius, run(src, sw, sh, dst) }.
+-- Kernel stages by name: builder(entry, name) -> { radius, run(src, sw, sh, dst, c0, r0, state) },
+-- with (c0, r0) the absolute cell of src[0] (only position-dependent stages use it).
 local KERNEL_STAGES = {
   convolve = function(entry, name)
     local k = entry.kernel or entry[2]
@@ -802,6 +871,28 @@ local KERNEL_STAGES = {
       end,
     }
   end,
+  gullies = function(entry)
+    local scale = entry.scale or 8
+    if type(scale) ~= "number" or scale <= 0 then
+      error("vnoise: stage 'gullies' needs scale > 0, got " .. tostring(scale), 3)
+    end
+    local octaves = entry.octaves or 2
+    if type(octaves) ~= "number" or octaves ~= math.floor(octaves) or octaves < 1 or octaves > 4 then
+      error("vnoise: stage 'gullies' needs integer octaves in 1..4, got " .. tostring(octaves), 3)
+    end
+    local strength, gain, sharpness = entry.strength or 0.05, entry.gain or 0.5, entry.sharpness or 1
+    for pname, v in pairs({ strength = strength, gain = gain, sharpness = sharpness }) do
+      if type(v) ~= "number" then
+        error("vnoise: stage 'gullies' needs a number for " .. pname, 3)
+      end
+    end
+    return {
+      radius = 1,
+      run = function(src, sw, sh, dst, c0, r0, state)
+        lib.vnoise_gullies(src, sw, sh, dst, c0, r0, state.s, scale, strength, octaves, gain, sharpness)
+      end,
+    }
+  end,
   distance = function(entry, name)
     local r = radiusArg(name, entry[2], 1, MAX_RADIUS)
     local t = entry[3] or 0.5
@@ -867,8 +958,11 @@ local Pipeline = {}
 -- `blur` (r), `gaussian` (sigma), `sharpen`/`emboss`/`laplacian` (k),
 -- `sobel`/`sobel_x`/`sobel_y` (k), `erode`/`dilate`/`open`/`close`/
 -- `morph_gradient`/`tophat`/`blackhat` (r, `shape` = "square" | "disc"),
--- `median` (r) and `distance` (r, t). Any stage may carry `mask = <mask
--- spec>` (see `compile_mask`): it then only acts where the mask weighs.
+-- `median` (r) and `distance` (r, t), and `gullies` (scale, strength,
+-- octaves, gain, sharpness; radius 1, an erosion filter). Any stage may carry
+-- `mask = <mask spec>` (see `compile_mask`): it then only acts where the mask
+-- weighs. `source = <source spec>` (see `compile_source`) replaces the single
+-- fractal sampler with a source tree; it cannot be combined with `domain`.
 -- Consecutive unmasked point ops are fused into one chain. `radius` is the
 -- total border the stages consume. A compiled pipeline is returned unchanged.
 -- @param spec table The pipeline description.
@@ -876,6 +970,9 @@ local Pipeline = {}
 function vnoise.compile_pipeline(spec)
   if getmetatable(spec) == Pipeline then
     return spec
+  end
+  if spec.source ~= nil and spec.domain ~= nil then
+    error("vnoise: a pipeline cannot have both 'domain' and 'source' (source leaves carry their domains)", 2)
   end
   local stages, radius = {}, 0
   local pending -- unmasked point entries waiting to be fused
@@ -912,44 +1009,53 @@ function vnoise.compile_pipeline(spec)
     end
   end
   flush()
-  return setmetatable({ domain = vnoise.compile_domain(spec.domain), stages = stages, radius = radius }, Pipeline)
+  local source = spec.source ~= nil and vnoise.compile_source(spec.source) or nil
+  return setmetatable(
+    { domain = vnoise.compile_domain(spec.domain), source = source, stages = stages, radius = radius },
+    Pipeline
+  )
 end
 
 --- Evaluates a pipeline for cells `(c0 .. c0 + w - 1, r0 .. r0 + h - 1)`.
 -- The noise is sampled through the pipeline's domain over the block grown by
--- `pipeline.radius` on every side (the apron), the stages run in order on
+-- `pipeline.radius` on every side (the apron; from the pipeline's source
+-- tree when it has one, then `kind` may be nil), the stages run in order on
 -- unclamped values (each kernel shrinks the buffer by twice its radius), and
 -- the result is clamped to 0..1 unless `opts.clamp` is false. Every cell's
 -- value depends only on its absolute index, so blocks tile seamlessly.
 -- @param state table A state from `vnoise.new`.
--- @param kind string "fbm", "ridge" or "turb".
+-- @param kind string|nil "fbm", "ridge" or "turb" (ignored with a source).
 -- @param pipeline table A pipeline description or compiled pipeline.
 -- @param opts table c0, r0 (default 0), w, h (default 256), ox, oy, freq, octaves, lac, gain, base,
 --   out (optional float[w*h]), clamp (default true).
 -- @return cdata The float[w*h] buffer.
 function vnoise.fill_pipeline(state, kind, pipeline, opts)
-  local mode = modeOf(kind)
   local p = vnoise.compile_pipeline(pipeline)
+  local mode = not p.source and modeOf(kind)
   local w, h = opts.w or 256, opts.h or 256
   local c0, r0 = opts.c0 or 0, opts.r0 or 0
   local rem = p.radius -- apron still around the current buffer
   local sw, sh = w + 2 * rem, h + 2 * rem
   local cur = ffi.new("float[?]", sw * sh)
   local alt = ffi.new("float[?]", sw * sh)
-  lib.vnoise_fill_domain(
-    state.s,
-    opts.base or vnoise.BASE_SIMPLEX2,
-    mode,
-    cur,
-    c0 - rem,
-    r0 - rem,
-    sw,
-    sh,
-    domainFor(p.domain, opts),
-    opts.octaves or 6,
-    opts.lac or 2.0,
-    opts.gain or 0.5
-  )
+  if p.source then
+    vnoise.fill_source(state, p.source, { c0 = c0 - rem, r0 = r0 - rem, w = sw, h = sh, out = cur })
+  else
+    lib.vnoise_fill_domain(
+      state.s,
+      opts.base or vnoise.BASE_SIMPLEX2,
+      mode,
+      cur,
+      c0 - rem,
+      r0 - rem,
+      sw,
+      sh,
+      domainFor(p.domain, opts),
+      opts.octaves or 6,
+      opts.lac or 2.0,
+      opts.gain or 0.5
+    )
+  end
   for _, stage in ipairs(p.stages) do
     local m = stage.mask
     if stage.chain then
@@ -964,7 +1070,7 @@ function vnoise.fill_pipeline(state, kind, pipeline, opts)
     else
       local r = stage.radius
       local nw, nh = sw - 2 * r, sh - 2 * r
-      stage.run(cur, sw, sh, alt)
+      stage.run(cur, sw, sh, alt, c0 - rem, r0 - rem, state)
       if m then
         lib.vnoise_mask_blend(alt, nw, nh, cur + r * sw + r, sw, c0 - rem + r, r0 - rem + r, m.mask, m.data)
       end
@@ -978,6 +1084,650 @@ function vnoise.fill_pipeline(state, kind, pipeline, opts)
     lib.vnoise_map_buffer(out, w * h, nil, 0, nil, 1)
   end
   return out
+end
+
+-- Samplers --------------------------------------------------------------------
+
+-- Sampler kinds of fill_sampler and source leaves, mapped to their modes.
+local SAMPLER_KINDS = {
+  fbm = vnoise.MODE_FBM,
+  ridge = vnoise.MODE_RIDGE,
+  turb = vnoise.MODE_TURB,
+  cell_f1 = vnoise.MODE_CELL_F1,
+  cell_f2 = vnoise.MODE_CELL_F2,
+  cell_edge = vnoise.MODE_CELL_EDGE,
+  cell_value = vnoise.MODE_CELL_VALUE,
+  damped = vnoise.MODE_DAMPED,
+}
+
+-- Builds a vnoise_sampler_t from `{ kind, base, octaves, lac, gain, jitter, damping }`.
+local function samplerStruct(spec, level)
+  local mode = SAMPLER_KINDS[spec.kind]
+  if not mode then
+    error("vnoise: unknown sampler kind '" .. tostring(spec.kind) .. "'", level + 1)
+  end
+  local sp = ffi.new("vnoise_sampler_t")
+  sp.mode = mode
+  sp.base = spec.base or vnoise.BASE_SIMPLEX2
+  sp.octaves = spec.octaves or 6
+  sp.lac = spec.lac or 2.0
+  sp.gain = spec.gain or 0.5
+  sp.jitter = spec.jitter or 1
+  sp.damping = spec.damping or 1
+  return sp
+end
+
+-- Folds a stride and a cell origin into a domain's affine map, so a native
+-- fill over cells (0 .. w - 1, 0 .. h - 1) samples the absolute cells
+-- (c0 + i * stride, r0 + j * stride).
+local function stridedDomain(d, c0, r0, stride)
+  local m = d.m
+  local nd = ffi.new("vnoise_domain_t", d)
+  nd.m[0], nd.m[1], nd.m[2] = m[0] * stride, m[1] * stride, m[0] * c0 + m[1] * r0 + m[2]
+  nd.m[3], nd.m[4], nd.m[5] = m[3] * stride, m[4] * stride, m[3] * c0 + m[4] * r0 + m[5]
+  return nd
+end
+
+--- Fills cells `(c0 .. c0 + w - 1, r0 .. r0 + h - 1)` with a sampler through
+-- a domain. Kinds: "fbm", "ridge", "turb" (as `fill_domain`), "cell_f1",
+-- "cell_f2", "cell_edge", "cell_value" (cellular noise, values in 0..1) and
+-- "damped" (derivative-damped fBm).
+-- @param state table A state from `vnoise.new`.
+-- @param spec table `{ kind, base, octaves (6), lac (2), gain (0.5), jitter (1), damping (1) }`.
+-- @param opts table|nil c0, r0 (0), w, h (256), freq (0.01), ox, oy, domain, out, and stride (1:
+--   buffer cell (i, j) is cell (c0 + i * stride, r0 + j * stride)).
+-- @return cdata The float[w*h] buffer.
+function vnoise.fill_sampler(state, spec, opts)
+  opts = opts or {}
+  local sp = samplerStruct(spec, 2)
+  local w, h = opts.w or 256, opts.h or 256
+  local out = opts.out or ffi.new("float[?]", w * h)
+  local d = domainFor(vnoise.compile_domain(opts.domain), opts)
+  local c0, r0, stride = opts.c0 or 0, opts.r0 or 0, opts.stride or 1
+  if stride ~= 1 then
+    d, c0, r0 = stridedDomain(d, c0, r0, stride), 0, 0
+  end
+  lib.vnoise_fill_sampler(state.s, sp, out, c0, r0, w, h, d)
+  return out
+end
+
+-- Source trees ----------------------------------------------------------------
+
+-- Marks a compiled source node.
+local Source = {}
+-- Marks a terrain plan object.
+local Plan = {}
+Plan.__index = Plan
+
+local COMBINE = { set = 0, add = 1, mul = 2, min = 3, max = 4, sub = 5, abs = 6, pow = 7 }
+local TERRAIN_OUTPUTS = { elevation = true, river = true, lake = true, flow = true, channel_distance = true }
+
+local compileNode
+
+-- Compiles the children spec[first .. #spec] of a combinator.
+local function children(spec, first, path, min, max)
+  local list = {}
+  for k = first, #spec do
+    list[#list + 1] = compileNode(spec[k], path .. "." .. spec[1] .. "[" .. (k - first + 1) .. "]")
+  end
+  if #list < min or (max and #list > max) then
+    local want = max == min and tostring(min) or (max and (min .. ".." .. max) or ("at least " .. min))
+    error(("vnoise: source node '%s' at %s needs %s children, got %d"):format(spec[1], path, want, #list), 0)
+  end
+  return list
+end
+
+-- Builders of the non-sampler nodes: (spec, path) -> node.
+local SOURCE_NODES = {
+  const = function(spec, path)
+    if type(spec[2]) ~= "number" then
+      error("vnoise: source node 'const' at " .. path .. " needs a number", 0)
+    end
+    return { t = "const", v = spec[2] }
+  end,
+  mask = function(spec, path)
+    if type(spec[2]) ~= "table" then
+      error("vnoise: source node 'mask' at " .. path .. " needs a mask spec", 0)
+    end
+    return { t = "mask", mask = vnoise.compile_mask(spec[2]) }
+  end,
+  pipeline = function(spec, path)
+    if type(spec[2]) ~= "table" then
+      error("vnoise: source node 'pipeline' at " .. path .. " needs a pipeline spec", 0)
+    end
+    local p = vnoise.compile_pipeline(spec[2])
+    local kind = spec.kind or (not p.source and "fbm" or nil)
+    if kind ~= nil and not MODES[kind] then
+      error("vnoise: source node 'pipeline' at " .. path .. " has an unknown kind '" .. tostring(kind) .. "'", 0)
+    end
+    return {
+      t = "pipeline",
+      pipeline = p,
+      kind = kind,
+      state = spec.seed and vnoise.new(spec.seed) or nil,
+      opts = {
+        freq = spec.freq,
+        ox = spec.ox,
+        oy = spec.oy,
+        octaves = spec.octaves,
+        lac = spec.lac,
+        gain = spec.gain,
+        base = spec.base,
+      },
+    }
+  end,
+  plan = function(spec, path)
+    if getmetatable(spec[2]) ~= Plan then
+      error("vnoise: source node 'plan' at " .. path .. " needs a terrain plan", 0)
+    end
+    local output = spec.output or "elevation"
+    if not TERRAIN_OUTPUTS[output] then
+      error("vnoise: source node 'plan' at " .. path .. " has an unknown output '" .. tostring(output) .. "'", 0)
+    end
+    return { t = "plan", plan = spec[2], output = output }
+  end,
+  add = function(spec, path)
+    local list = children(spec, 2, path, 1)
+    local weights = {}
+    for k = 1, #list do
+      local w = spec.weights and spec.weights[k] or 1
+      if type(w) ~= "number" then
+        error("vnoise: source node 'add' at " .. path .. " has a non-numeric weight", 0)
+      end
+      weights[k] = w
+    end
+    return { t = "add", children = list, weights = weights }
+  end,
+  mul = function(spec, path)
+    return { t = "mul", children = children(spec, 2, path, 1) }
+  end,
+  min = function(spec, path)
+    return { t = "min", children = children(spec, 2, path, 1) }
+  end,
+  max = function(spec, path)
+    return { t = "max", children = children(spec, 2, path, 1) }
+  end,
+  sub = function(spec, path)
+    return { t = "sub", children = children(spec, 2, path, 2, 2) }
+  end,
+  abs = function(spec, path)
+    return { t = "abs", children = children(spec, 2, path, 1, 1) }
+  end,
+  pow = function(spec, path)
+    local e = spec[3]
+    if type(e) ~= "number" then
+      error("vnoise: source node 'pow' at " .. path .. " needs a numeric exponent", 0)
+    end
+    return { t = "pow", children = { compileNode(spec[2], path .. ".pow[1]") }, e = e }
+  end,
+  lerp = function(spec, path)
+    return { t = "lerp", children = children(spec, 2, path, 3, 3) }
+  end,
+}
+
+compileNode = function(spec, path)
+  if getmetatable(spec) == Source then
+    return spec
+  end
+  if type(spec) ~= "table" then
+    error("vnoise: source at " .. path .. " must be a table, got " .. type(spec), 0)
+  end
+  local tag = spec[1]
+  local node
+  local kind = spec.kind
+  if type(tag) == "string" and SAMPLER_KINDS[tag] then
+    kind, tag = tag, nil
+  end
+  if tag == nil then
+    if kind == nil then
+      error("vnoise: source at " .. path .. " has no node name or sampler kind", 0)
+    end
+    if not SAMPLER_KINDS[kind] then
+      error("vnoise: unknown sampler kind '" .. tostring(kind) .. "' at " .. path, 0)
+    end
+    node = {
+      t = "sampler",
+      sp = samplerStruct({
+        kind = kind,
+        base = spec.base,
+        octaves = spec.octaves,
+        lac = spec.lac,
+        gain = spec.gain,
+        jitter = spec.jitter,
+        damping = spec.damping,
+      }, 1),
+      domain = vnoise.compile_domain(spec.domain),
+      freq = spec.freq,
+      ox = spec.ox,
+      oy = spec.oy,
+      state = spec.seed and vnoise.new(spec.seed) or nil,
+    }
+  else
+    local builder = type(tag) == "string" and SOURCE_NODES[tag]
+    if not builder then
+      error("vnoise: unknown source node '" .. tostring(tag) .. "' at " .. path, 0)
+    end
+    node = builder(spec, path)
+  end
+  if spec.ops then
+    node.chain = vnoise.compile_ops(spec.ops)
+  end
+  return setmetatable(node, Source)
+end
+
+--- Compiles a source tree: sampler leaves (`{ "fbm", freq = ..., ... }` or
+-- `{ kind = "fbm", ... }`, with optional `domain`, `seed` (own state) and
+-- `ops`), `{ "const", v }`, `{ "mask", <mask spec> }` (the mask weight),
+-- `{ "pipeline", <pipeline spec>, kind = ..., <sampler opts> }`,
+-- `{ "plan", plan, output = name }`, and the combinators `add` (with
+-- `weights`), `mul`, `min`, `max`, `sub`, `abs`, `pow` (`{ "pow", a, e }`) and
+-- `lerp` (`{ "lerp", a, b, t }`). Any node may carry `ops` (a point op chain
+-- applied after it). Values flow unclamped. A compiled source is returned
+-- unchanged.
+-- @param spec table The source description.
+-- @return table The compiled source.
+function vnoise.compile_source(spec)
+  local ok, res = pcall(compileNode, spec, "source")
+  if not ok then
+    error(res, 2)
+  end
+  return res
+end
+
+-- Evaluates a node cell by cell (w = h = 1 calls), for leaves that cannot
+-- sample with a stride (pipelines, masks, plans) when a stride is asked.
+local function perCell(fill, c0, r0, w, h, stride, out)
+  local one = ffi.new("float[1]")
+  for j = 0, h - 1 do
+    for i = 0, w - 1 do
+      fill(c0 + i * stride, r0 + j * stride, one)
+      out[j * w + i] = one[0]
+    end
+  end
+end
+
+local evalNode
+
+local function evalLeafMask(node, c0, r0, w, h, out)
+  local n = w * h
+  for k = 0, n - 1 do
+    out[k] = 1
+  end
+  local zero = ffi.new("float[?]", n)
+  lib.vnoise_mask_blend(out, w, h, zero, w, c0, r0, node.mask.mask, node.mask.data)
+end
+
+-- Fills `out` (w * h) with node `node` over the strided block of cells.
+evalNode = function(node, state, c0, r0, w, h, stride, out)
+  local n = w * h
+  local t = node.t
+  if t == "sampler" then
+    local d = domainFor(node.domain, node)
+    local cc, rr = c0, r0
+    if stride ~= 1 then
+      d, cc, rr = stridedDomain(d, c0, r0, stride), 0, 0
+    end
+    lib.vnoise_fill_sampler((node.state or state).s, node.sp, out, cc, rr, w, h, d)
+  elseif t == "const" then
+    for k = 0, n - 1 do
+      out[k] = node.v
+    end
+  elseif t == "mask" then
+    if stride == 1 then
+      evalLeafMask(node, c0, r0, w, h, out)
+    else
+      perCell(function(c, r, one)
+        evalLeafMask(node, c, r, 1, 1, one)
+      end, c0, r0, w, h, stride, out)
+    end
+  elseif t == "pipeline" then
+    local st = node.state or state
+    local function run(c, r, ww, hh, dst)
+      local o = { c0 = c, r0 = r, w = ww, h = hh, out = dst, clamp = false }
+      for key, v in pairs(node.opts) do
+        o[key] = v
+      end
+      vnoise.fill_pipeline(st, node.kind, node.pipeline, o)
+    end
+    if stride == 1 then
+      run(c0, r0, w, h, out)
+    else
+      perCell(function(c, r, one)
+        run(c, r, 1, 1, one)
+      end, c0, r0, w, h, stride, out)
+    end
+  elseif t == "plan" then
+    local function run(c, r, ww, hh, dst)
+      vnoise.fill_terrain(state, node.plan, {
+        c0 = c,
+        r0 = r,
+        w = ww,
+        h = hh,
+        outputs = { node.output },
+        out = { [node.output] = dst },
+      })
+    end
+    if stride == 1 then
+      run(c0, r0, w, h, out)
+    else
+      perCell(function(c, r, one)
+        run(c, r, 1, 1, one)
+      end, c0, r0, w, h, stride, out)
+    end
+  else
+    local kids = node.children
+    evalNode(kids[1], state, c0, r0, w, h, stride, out)
+    if t == "add" then
+      if node.weights[1] ~= 1 then
+        lib.vnoise_combine(out, out, n, COMBINE.set, node.weights[1])
+      end
+    elseif t == "abs" then
+      lib.vnoise_combine(out, nil, n, COMBINE.abs, 0)
+    elseif t == "pow" then
+      lib.vnoise_combine(out, nil, n, COMBINE.pow, node.e)
+    end
+    if #kids > 1 then
+      local tmp = ffi.new("float[?]", n)
+      if t == "lerp" then
+        local tt = ffi.new("float[?]", n)
+        evalNode(kids[2], state, c0, r0, w, h, stride, tmp)
+        evalNode(kids[3], state, c0, r0, w, h, stride, tt)
+        lib.vnoise_combine_lerp(out, tmp, tt, n)
+      else
+        for k = 2, #kids do
+          evalNode(kids[k], state, c0, r0, w, h, stride, tmp)
+          lib.vnoise_combine(out, tmp, n, COMBINE[t], t == "add" and node.weights[k] or 1)
+        end
+      end
+    end
+  end
+  local chain = node.chain
+  if chain then
+    lib.vnoise_map_buffer(out, n, chain.ops, chain.n, chain.data, 0)
+  end
+end
+
+--- Evaluates a source tree over cells `(c0 .. c0 + w - 1, r0 .. r0 + h - 1)`
+-- (or every `stride`-th cell). Every value depends only on its absolute
+-- cell, so blocks tile.
+-- @param state table A state from `vnoise.new` (leaves with `seed` use their own).
+-- @param source table A source description or compiled source.
+-- @param opts table|nil c0, r0 (0), w, h (256), out, stride (1), clamp (false: clamp to 0..1).
+-- @return cdata The float[w*h] buffer.
+function vnoise.fill_source(state, source, opts)
+  opts = opts or {}
+  local src = vnoise.compile_source(source)
+  local w, h = opts.w or 256, opts.h or 256
+  local out = opts.out or ffi.new("float[?]", w * h)
+  evalNode(src, state, opts.c0 or 0, opts.r0 or 0, w, h, opts.stride or 1, out)
+  if opts.clamp then
+    lib.vnoise_map_buffer(out, w * h, nil, 0, nil, 1)
+  end
+  return out
+end
+
+-- Presets ---------------------------------------------------------------------
+
+vnoise.presets = {}
+
+--- A continent: warped fBm in 0..1, offset by `land - 0.5`, multiplied by a
+-- feathered rectangle over the extent so land falls to 0 toward the border.
+-- @param opts table|nil width, height (extent in cells, 1024), freq (2.5 / max side), octaves (6),
+--   coast (0.15 of the shorter side), land (0.5), warp (cells, 0.08 of the shorter side), seed.
+-- @return table A source spec with values in 0..1.
+function vnoise.presets.continent(opts)
+  opts = opts or {}
+  local w, h = opts.width or 1024, opts.height or 1024
+  local size = math.min(w, h)
+  local freq = opts.freq or 2.5 / math.max(w, h)
+  return {
+    "mul",
+    {
+      "add",
+      {
+        "fbm",
+        freq = freq,
+        octaves = opts.octaves or 6,
+        seed = opts.seed,
+        domain = { warp = { amp = opts.warp or size * 0.08, freq = freq * 1.5, octaves = 3 } },
+        ops = { { "remap", -0.7, 0.7 } },
+      },
+      { "const", (opts.land or 0.5) - 0.5 },
+    },
+    { "mask", { "rect", 0, 0, w - 1, h - 1, feather = math.max(1, (opts.coast or 0.15) * size) } },
+    ops = { { "clamp", 0, 1 } },
+  }
+end
+
+--- Mountain belts: ridged noise multiplied by a band mask along the warped
+-- edges of a low-frequency cellular lattice, so ridges form long chains.
+-- @param opts table|nil freq (1/96), belt_freq (1/700), octaves (5), width (belt width as a
+--   cell_edge value, 0.25), sharpness (1.5), jitter (1), seed.
+-- @return table A source spec with values in 0..1.
+function vnoise.presets.mountain_belts(opts)
+  opts = opts or {}
+  local belt_freq = opts.belt_freq or 1 / 700
+  return {
+    "mul",
+    { "ridge", freq = opts.freq or 1 / 96, octaves = opts.octaves or 5, seed = opts.seed },
+    {
+      "cell_edge",
+      freq = belt_freq,
+      octaves = 1,
+      jitter = opts.jitter or 1,
+      seed = opts.seed and opts.seed + 1,
+      domain = { warp = { amp = 0.3 / belt_freq, freq = belt_freq * 2, octaves = 3 } },
+      ops = { { "smoothstep", 0, opts.width or 0.25 }, { "invert" }, { "gamma", opts.sharpness or 1.5 } },
+    },
+    ops = { { "clamp", 0, 1 } },
+  }
+end
+
+-- Terrain plans ---------------------------------------------------------------
+
+local OUTLETS = { edges = 0, sea = 1, both = 2 }
+local MOUTHS = { [0] = "sea", [1] = "edge", [2] = "river" }
+local GRIDS = { height = 0, filled = 1, flow = 2, lake = 3, receiver = 4, outlet = 5 }
+
+-- Reads a numeric option with a default and an inclusive range.
+local function numOpt(t, key, default, lo, hi, label, integer)
+  local v = t and t[key]
+  if v == nil then
+    return default
+  end
+  if type(v) ~= "number" or (integer and v ~= math.floor(v)) or (lo and v < lo) or (hi and v > hi) then
+    error(
+      ("vnoise: terrain_plan option '%s' must be %s%s, got %s"):format(
+        label,
+        integer and "an integer" or "a number",
+        (lo or hi) and (" in " .. tostring(lo or "-inf") .. ".." .. tostring(hi or "inf")) or "",
+        tostring(v)
+      ),
+      4
+    )
+  end
+  return v
+end
+
+--- Builds a terrain plan over a finite extent: the `elevation` (and optional
+-- `uplift`) source is sampled at the macro nodes (every `macro_cell` cells),
+-- eroded (implicit stream-power with uplift and diffusion), drained
+-- (priority-flood, D8, accumulation, lakes) and turned into a river network.
+-- The plan is immutable; its native memory is released by the collector.
+-- @param state table A state from `vnoise.new` (sources and the meander warp use its seed).
+-- @param spec table width, height (cells, 1..65536), macro_cell (64), elevation (source, required),
+--   uplift (source), sea_level (0), outlets ("both" | "edges" | "sea"),
+--   erosion = { iterations (60), reroute (4), k (0.01), m (0.5), dt (1), uplift (0.002), diffusion (0.01, <= 0.25) },
+--   rivers = { min_flow (32 nodes), width (2), max_width (24), depth (0.004), max_depth (0.03),
+--     lake_depth (0.002), smooth (2), valley (6), valley_min (8), valley_shape (1), bank (1),
+--     meander_amp (0), meander_freq (1/64), distance_range (64) },
+--   detail = { source (source spec, values in -1..1), amplitude (0.05), valley_damping (0.7) }.
+-- @return table The plan.
+function vnoise.terrain_plan(state, spec)
+  if type(spec) ~= "table" then
+    error("vnoise: terrain_plan needs a spec table", 2)
+  end
+  if spec.elevation == nil then
+    error("vnoise: terrain_plan needs 'elevation' (a source spec)", 2)
+  end
+  local width = numOpt(spec, "width", nil, 1, 65536, "width", true)
+  local height = numOpt(spec, "height", nil, 1, 65536, "height", true)
+  if not width or not height then
+    error("vnoise: terrain_plan needs 'width' and 'height' (cells)", 2)
+  end
+  local mc = numOpt(spec, "macro_cell", 64, 4, nil, "macro_cell", true)
+  local mw, mh = math.ceil(width / mc) + 1, math.ceil(height / mc) + 1
+  if mw * mh > 1048576 then
+    error(("vnoise: terrain_plan macro grid %d x %d exceeds 1048576 nodes; raise macro_cell"):format(mw, mh), 2)
+  end
+  local outlets = OUTLETS[spec.outlets or "both"]
+  if not outlets then
+    error("vnoise: terrain_plan option 'outlets' must be 'edges', 'sea' or 'both'", 2)
+  end
+  local er, rv, dt = spec.erosion or {}, spec.rivers or {}, spec.detail or {}
+
+  local p = ffi.new("vnoise_plan_params_t")
+  p.width, p.height, p.macro_cell = width, height, mc
+  p.sea_level = numOpt(spec, "sea_level", 0, 0, 1, "sea_level")
+  p.outlets = outlets
+  p.seed = state.s.seed
+  p.erosion_iterations = numOpt(er, "iterations", 60, 0, nil, "erosion.iterations", true)
+  p.erosion_reroute = numOpt(er, "reroute", 4, 1, nil, "erosion.reroute", true)
+  p.erosion_k = numOpt(er, "k", 0.01, 0, nil, "erosion.k")
+  p.erosion_m = numOpt(er, "m", 0.5, 0, nil, "erosion.m")
+  p.erosion_dt = numOpt(er, "dt", 1, 0, nil, "erosion.dt")
+  p.erosion_uplift = numOpt(er, "uplift", 0.002, nil, nil, "erosion.uplift")
+  p.erosion_diffusion = numOpt(er, "diffusion", 0.01, 0, 0.25, "erosion.diffusion")
+  p.river_min_flow = numOpt(rv, "min_flow", 32, 1, nil, "rivers.min_flow")
+  p.river_width = numOpt(rv, "width", 2, 0.001, nil, "rivers.width")
+  p.river_max_width = numOpt(rv, "max_width", math.max(24, p.river_width), p.river_width, nil, "rivers.max_width")
+  p.river_depth = numOpt(rv, "depth", 0.004, 0, nil, "rivers.depth")
+  p.river_max_depth = numOpt(rv, "max_depth", 0.03, 0, nil, "rivers.max_depth")
+  p.lake_depth = numOpt(rv, "lake_depth", 0.002, 0, nil, "rivers.lake_depth")
+  p.river_smooth = numOpt(rv, "smooth", 2, 0, 8, "rivers.smooth", true)
+  p.valley = numOpt(rv, "valley", 6, 0, nil, "rivers.valley")
+  p.valley_min = numOpt(rv, "valley_min", 8, 0, nil, "rivers.valley_min")
+  p.valley_shape = numOpt(rv, "valley_shape", 1, 0.01, nil, "rivers.valley_shape")
+  p.bank = numOpt(rv, "bank", 1, 0.001, nil, "rivers.bank")
+  p.meander_amp = numOpt(rv, "meander_amp", 0, 0, nil, "rivers.meander_amp")
+  p.meander_freq = numOpt(rv, "meander_freq", 1 / 64, 0, nil, "rivers.meander_freq")
+  p.distance_range = numOpt(rv, "distance_range", 64, 0.001, nil, "rivers.distance_range")
+  p.detail_amplitude = numOpt(dt, "amplitude", 0.05, 0, nil, "detail.amplitude")
+  p.detail_valley_damping = numOpt(dt, "valley_damping", 0.7, 0, 1, "detail.valley_damping")
+
+  local detail = dt.source ~= nil and vnoise.compile_source(dt.source) or nil
+  local hbuf = vnoise.fill_source(state, spec.elevation, { w = mw, h = mh, stride = mc })
+  local ubuf = spec.uplift ~= nil and vnoise.fill_source(state, spec.uplift, { w = mw, h = mh, stride = mc }) or nil
+  local handle = lib.vnoise_plan_create(p, hbuf, ubuf)
+  if handle == nil then
+    error("vnoise: terrain_plan parameters were rejected by the native library", 2)
+  end
+  return setmetatable({
+    handle = ffi.gc(handle, lib.vnoise_plan_destroy),
+    width = width,
+    height = height,
+    macro_cell = mc,
+    mw = mw,
+    mh = mh,
+    sea_level = p.sea_level,
+    detail_source = detail,
+  }, Plan)
+end
+
+--- Returns a copy of a macro grid (mw * mh floats, node (i, j) at j * mw + i):
+-- "height" (eroded), "filled", "flow" (accumulation in nodes), "lake" (0/1),
+-- "receiver" (node index, -1 for outlets) or "outlet" (0/1).
+-- @param name string The grid name.
+-- @return cdata float[mw * mh].
+function Plan:grid(name)
+  local which = GRIDS[name] or error("vnoise: unknown plan grid '" .. tostring(name) .. "'", 2)
+  local out = ffi.new("float[?]", self.mw * self.mh)
+  lib.vnoise_plan_grid(self.handle, which, out)
+  return out
+end
+
+--- Returns the river network as a list of polylines `{ points = { x1, y1, ...
+-- }, flow = {...}, width = {...}, bed = {...}, mouth = "sea" | "edge" |
+-- "river" }` in absolute cells (cached; do not modify).
+-- @return table The polylines.
+function Plan:rivers()
+  if self._rivers then
+    return self._rivers
+  end
+  local info = ffi.new("int[4]")
+  lib.vnoise_plan_info(self.handle, info, info + 1, info + 2, info + 3)
+  local np, nv = info[2], info[3]
+  local start, count, mouth = ffi.new("int[?]", np + 1), ffi.new("int[?]", np + 1), ffi.new("int[?]", np + 1)
+  local x, y = ffi.new("float[?]", nv + 1), ffi.new("float[?]", nv + 1)
+  local fl, wd, bd = ffi.new("float[?]", nv + 1), ffi.new("float[?]", nv + 1), ffi.new("float[?]", nv + 1)
+  lib.vnoise_plan_rivers(self.handle, start, count, mouth, x, y, fl, wd, bd)
+  local list = {}
+  for k = 0, np - 1 do
+    local poly = { points = {}, flow = {}, width = {}, bed = {}, mouth = MOUTHS[mouth[k]] }
+    for v = start[k], start[k] + count[k] - 1 do
+      poly.points[#poly.points + 1] = x[v]
+      poly.points[#poly.points + 1] = y[v]
+      poly.flow[#poly.flow + 1] = fl[v]
+      poly.width[#poly.width + 1] = wd[v]
+      poly.bed[#poly.bed + 1] = bd[v]
+    end
+    list[k + 1] = poly
+  end
+  self._rivers = list
+  return list
+end
+
+--- Nearest river at cell (c, r), after the meander warp.
+-- @return number|nil distance (cells), bed, width, flow, polyline index (1-based); nil when no
+--   river is indexed near the cell.
+function Plan:query(c, r)
+  local out = ffi.new("float[5]")
+  if lib.vnoise_plan_query(self.handle, c, r, out) == 0 then
+    return nil
+  end
+  return out[0], out[1], out[2], out[3], out[4] + 1
+end
+
+--- Fills a block of cells from a terrain plan with several outputs, all in
+-- 0..1: "elevation" (macro height + detail, rivers carved), "river"
+-- (channel mask), "lake", "flow" (log accumulation) and "channel_distance".
+-- Every value depends only on its absolute cell, so blocks tile.
+-- @param state table The state for the plan's detail source.
+-- @param plan table A plan from `vnoise.terrain_plan`.
+-- @param opts table|nil c0, r0 (0), w, h (256), outputs ({ "elevation" }), out ({ name = float[w*h] }).
+-- @return table Output name -> float[w*h].
+function vnoise.fill_terrain(state, plan, opts)
+  opts = opts or {}
+  if getmetatable(plan) ~= Plan then
+    error("vnoise: fill_terrain needs a terrain plan", 2)
+  end
+  local w, h = opts.w or 256, opts.h or 256
+  local c0, r0 = opts.c0 or 0, opts.r0 or 0
+  local res = {}
+  for _, name in ipairs(opts.outputs or { "elevation" }) do
+    if not TERRAIN_OUTPUTS[name] then
+      error("vnoise: unknown terrain output '" .. tostring(name) .. "'", 2)
+    end
+    res[name] = opts.out and opts.out[name] or ffi.new("float[?]", w * h)
+  end
+  local detail
+  if plan.detail_source and (res.elevation or res.lake) then
+    detail = vnoise.fill_source(state, plan.detail_source, { c0 = c0, r0 = r0, w = w, h = h })
+  end
+  lib.vnoise_plan_fill(
+    plan.handle,
+    c0,
+    r0,
+    w,
+    h,
+    detail,
+    res.elevation,
+    res.river,
+    res.lake,
+    res.flow,
+    res.channel_distance
+  )
+  return res
 end
 
 -- Global statistics as point ops ----------------------------------------------

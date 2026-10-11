@@ -83,6 +83,50 @@ float simplex2(const noise_state_t* s, float x, float y) {
     return SIMPLEX2_SCALE * (n0 + n1 + n2);
 }
 
+// 2D simplex with its analytic gradient. Each corner contributes
+// t^4 (g . d) with t = 0.5 - |d|^2, whose gradient is t^4 g - 8 t^3 (g . d) d.
+// The value is computed exactly as in simplex2.
+float simplex2_grad(const noise_state_t* s, float x, float y, float* gx, float* gy) {
+    float skew = (x + y) * SKEW2;
+    int i = fastfloor(x + skew);
+    int j = fastfloor(y + skew);
+    float unskew = (i + j) * UNSKEW2;
+    float x0 = x - (i - unskew);
+    float y0 = y - (j - unskew);
+
+    int i1, j1;
+    if (x0 > y0) { i1 = 1; j1 = 0; }
+    else         { i1 = 0; j1 = 1; }
+
+    const float xs[3] = { x0, x0 - i1 + UNSKEW2, x0 - 1.0f + 2.0f * UNSKEW2 };
+    const float ys[3] = { y0, y0 - j1 + UNSKEW2, y0 - 1.0f + 2.0f * UNSKEW2 };
+    int ii = i & 255;
+    int jj = j & 255;
+    const unsigned int* p = s->perm;
+    const int gi[3] = {
+        (int)(p[ii      + p[jj     ]] & 15),
+        (int)(p[ii + i1 + p[jj + j1]] & 15),
+        (int)(p[ii + 1  + p[jj + 1 ]] & 15),
+    };
+
+    float n = 0.0f, dx = 0.0f, dy = 0.0f;
+    for (int k = 0; k < 3; ++k) {
+        float t = 0.5f - xs[k] * xs[k] - ys[k] * ys[k];
+        if (t < 0) continue;
+        const float gxk = GRAD2[gi[k]][0], gyk = GRAD2[gi[k]][1];
+        const float gd = gxk * xs[k] + gyk * ys[k];
+        const float t2 = t * t;
+        const float t4 = t2 * t2;
+        n += t4 * gd;
+        const float c = -8.0f * t2 * t * gd;
+        dx += t4 * gxk + c * xs[k];
+        dy += t4 * gyk + c * ys[k];
+    }
+    if (gx) *gx = SIMPLEX2_SCALE * dx;
+    if (gy) *gy = SIMPLEX2_SCALE * dy;
+    return SIMPLEX2_SCALE * n;
+}
+
 float simplex3(const noise_state_t* s, float x, float y, float z) {
     if (s == 0) return 0;
     float skew = (x + y + z) * SKEW3;
@@ -140,6 +184,16 @@ VNOISE_API float simplex2_eval(const noise_state_t* s, float x, float y) {
 VNOISE_API float simplex3_eval(const noise_state_t* s, float x, float y, float z) {
     if (!s) return 0;
     return vnoise::simplex3(s, x, y, z);
+}
+
+
+VNOISE_API float simplex2_deriv(const noise_state_t* s, float x, float y, float* dx, float* dy) {
+    if (!s) {
+        if (dx) *dx = 0;
+        if (dy) *dy = 0;
+        return 0;
+    }
+    return vnoise::simplex2_grad(s, x, y, dx, dy);
 }
 
 }

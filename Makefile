@@ -4,8 +4,9 @@ CXX ?= c++
 
 SRCS := $(wildcard cpp/src/*.cpp)
 OBJS := $(SRCS:.cpp=.o)
+DEPS := $(SRCS:.cpp=.d)
 
-CPPFLAGS := -Icpp/include -DVNOISE_LIBRARY
+CPPFLAGS := -Icpp/include -DVNOISE_LIBRARY -MMD -MP
 CXXFLAGS := -O3 -ffast-math -fno-rtti -fno-exceptions -fPIC -fvisibility=hidden -Wall -std=c++17
 
 ifeq ($(NATIVE),0)
@@ -35,8 +36,11 @@ $(TARGET): $(OBJS)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJS) $(TARGET) tests/smoke
+	rm -f $(OBJS) $(DEPS) $(TARGET) tests/smoke
 
 test: $(TARGET)
 	luajit tests/value_ops.lua
 	luajit tests/image_ops.lua
+	luajit tests/terrain.lua
+
+-include $(DEPS)
