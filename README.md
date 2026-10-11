@@ -185,6 +185,9 @@ domain like `fill_domain`:
 | `cell_f1`, `cell_f2`, `cell_edge`, `cell_value` | 0..1 | Worley noise: distance to the nearest / second-nearest feature point, their difference (0 on cell borders: ridge and crack networks) and a per-cell value; `jitter` 0..1, fractal sums average octaves |
 | `damped` | about -1..1 | fBm in which each octave is damped by `1 / (1 + damping ‖D‖²)`, `D` the running sum of gradients: steep areas lose fine detail (smooth valleys, rough peaks); `damping = 0` is fBm |
 
+`fill_grid`, `fill_domain` and `fill_pipeline` accept every kind above as
+their `kind` (the new kinds read `opts.jitter` and `opts.damping`); the
+classic kinds keep their dedicated native fills, bit-identical to before.
 `simplex2_deriv` and `perlin2_deriv` return the analytic gradient as well;
 `cellular2_eval(s, x, y, jitter, ret)` evaluates one cellular octave.
 

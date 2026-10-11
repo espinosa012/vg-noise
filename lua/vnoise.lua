@@ -446,23 +446,89 @@ local FNS_3D = {
   turb = lib.turb3_fill_volume,
 }
 
+-- Sampler kinds of fill_sampler and source leaves, mapped to their modes.
+local SAMPLER_KINDS = {
+  fbm = vnoise.MODE_FBM,
+  ridge = vnoise.MODE_RIDGE,
+  turb = vnoise.MODE_TURB,
+  cell_f1 = vnoise.MODE_CELL_F1,
+  cell_f2 = vnoise.MODE_CELL_F2,
+  cell_edge = vnoise.MODE_CELL_EDGE,
+  cell_value = vnoise.MODE_CELL_VALUE,
+  damped = vnoise.MODE_DAMPED,
+}
+
+-- Builds a vnoise_sampler_t from `{ kind, base, octaves, lac, gain, jitter, damping }`.
+local function samplerStruct(spec, level)
+  local mode = SAMPLER_KINDS[spec.kind]
+  if not mode then
+    error("vnoise: unknown sampler kind '" .. tostring(spec.kind) .. "'", level + 1)
+  end
+  local sp = ffi.new("vnoise_sampler_t")
+  sp.mode = mode
+  sp.base = spec.base or vnoise.BASE_SIMPLEX2
+  sp.octaves = spec.octaves or 6
+  sp.lac = spec.lac or 2.0
+  sp.gain = spec.gain or 0.5
+  sp.jitter = spec.jitter or 1
+  sp.damping = spec.damping or 1
+  return sp
+end
+
+-- Builds the sampler for a non-classic kind of `fill_grid`, `fill_domain` or
+-- `fill_pipeline` from the fill options (`base`, `octaves`, `lac`, `gain`,
+-- `jitter`, `damping`); nil for the classic fractal kinds, which keep their
+-- dedicated native fills (bit-identical to earlier versions).
+local function fillSampler(kind, opts, level)
+  if kind == "fbm" or kind == "ridge" or kind == "turb" then
+    return nil
+  end
+  return samplerStruct({
+    kind = kind,
+    base = opts.base,
+    octaves = opts.octaves,
+    lac = opts.lac,
+    gain = opts.gain,
+    jitter = opts.jitter,
+    damping = opts.damping,
+  }, level + 1)
+end
+
+--- Fills a float[w*h] grid: cell (i, j) is sampled at (ox + i * freq, oy + j * freq).
+-- @param state table A state from `vnoise.new`.
+-- @param kind string Any sampler kind ("fbm", "ridge", "turb" use the dedicated grid fills;
+--   "damped" and the cellular kinds go through `vnoise_fill_sampler` with an identity domain
+--   and read `opts.jitter` / `opts.damping`).
+-- @param opts table w, h (256), ox, oy, freq (0.01), octaves, lac, gain, base, jitter, damping,
+--   out, ops and clamp (default true, applied with ops).
+-- @return cdata The float[w*h] buffer.
 function vnoise.fill_grid(state, kind, opts)
-  local fn = FNS_2D[kind] or error("unknown fractal kind '" .. tostring(kind) .. "'", 2)
+  local fn = FNS_2D[kind]
+  local sp = not fn and fillSampler(kind, opts, 2)
   local w, h = opts.w or 256, opts.h or 256
   local out = opts.out or ffi.new("float[?]", w * h)
-  fn(
-    state.s,
-    opts.base or vnoise.BASE_SIMPLEX2,
-    out,
-    opts.ox or 0,
-    opts.oy or 0,
-    w,
-    h,
-    opts.freq or 0.01,
-    opts.octaves or 6,
-    opts.lac or 2.0,
-    opts.gain or 0.5
-  )
+  if sp then
+    -- Identity domain over cells (0 .. w - 1, 0 .. h - 1): cell (i, j) is
+    -- sampled at (ox + i * freq, oy + j * freq), as the classic grid fills.
+    local d = ffi.new("vnoise_domain_t")
+    d.m[0], d.m[4] = 1, 1
+    d.ox, d.oy, d.freq = opts.ox or 0, opts.oy or 0, opts.freq or 0.01
+    lib.vnoise_fill_sampler(state.s, sp, out, 0, 0, w, h, d)
+  else
+    fn(
+      state.s,
+      opts.base or vnoise.BASE_SIMPLEX2,
+      out,
+      opts.ox or 0,
+      opts.oy or 0,
+      w,
+      h,
+      opts.freq or 0.01,
+      opts.octaves or 6,
+      opts.lac or 2.0,
+      opts.gain or 0.5
+    )
+  end
   -- Optional op chain over the raw values (clamped unless opts.clamp is false).
   if opts.ops then
     local chain = vnoise.compile_ops(opts.ops)
@@ -678,7 +744,7 @@ local function domainFor(domain, opts)
 end
 
 local function modeOf(kind)
-  return MODES[kind] or error("vnoise: unknown fractal kind '" .. tostring(kind) .. "'", 3)
+  return MODES[kind] or SAMPLER_KINDS[kind] or error("vnoise: unknown fractal kind '" .. tostring(kind) .. "'", 3)
 end
 
 --- Fills cells `(c0 .. c0 + w - 1, r0 .. r0 + h - 1)` by absolute index
@@ -686,7 +752,8 @@ end
 -- `(c, r)` is sampled at `(ox + c' * freq, oy + r' * freq)`, `(c', r')` the
 -- transformed cell, so overlapping blocks agree.
 -- @param state table A state from `vnoise.new`.
--- @param kind string "fbm", "ridge" or "turb".
+-- @param kind string Any sampler kind: "fbm", "ridge", "turb", "damped", "cell_f1", "cell_f2",
+--   "cell_edge" or "cell_value" (the last five read `opts.jitter` and `opts.damping`).
 -- @param opts table c0, r0 (default 0), w, h (default 256), ox, oy, freq, octaves, lac, gain, base,
 --   domain, out (optional buffer), ops and clamp (as in fill_grid).
 -- @return cdata The filled float[w*h] buffer.
@@ -695,20 +762,25 @@ function vnoise.fill_domain(state, kind, opts)
   local w, h = opts.w or 256, opts.h or 256
   local out = opts.out or ffi.new("float[?]", w * h)
   local d = domainFor(vnoise.compile_domain(opts.domain), opts)
-  lib.vnoise_fill_domain(
-    state.s,
-    opts.base or vnoise.BASE_SIMPLEX2,
-    mode,
-    out,
-    opts.c0 or 0,
-    opts.r0 or 0,
-    w,
-    h,
-    d,
-    opts.octaves or 6,
-    opts.lac or 2.0,
-    opts.gain or 0.5
-  )
+  local sp = fillSampler(kind, opts, 2)
+  if sp then
+    lib.vnoise_fill_sampler(state.s, sp, out, opts.c0 or 0, opts.r0 or 0, w, h, d)
+  else
+    lib.vnoise_fill_domain(
+      state.s,
+      opts.base or vnoise.BASE_SIMPLEX2,
+      mode,
+      out,
+      opts.c0 or 0,
+      opts.r0 or 0,
+      w,
+      h,
+      d,
+      opts.octaves or 6,
+      opts.lac or 2.0,
+      opts.gain or 0.5
+    )
+  end
   if opts.ops then
     local chain = vnoise.compile_ops(opts.ops)
     lib.vnoise_map_buffer(out, w * h, chain.ops, chain.n, chain.data, opts.clamp == false and 0 or 1)
@@ -1024,7 +1096,8 @@ end
 -- the result is clamped to 0..1 unless `opts.clamp` is false. Every cell's
 -- value depends only on its absolute index, so blocks tile seamlessly.
 -- @param state table A state from `vnoise.new`.
--- @param kind string|nil "fbm", "ridge" or "turb" (ignored with a source).
+-- @param kind string|nil Any sampler kind (see `fill_domain`; non-classic kinds read `opts.jitter`
+--   and `opts.damping`), ignored with a source.
 -- @param pipeline table A pipeline description or compiled pipeline.
 -- @param opts table c0, r0 (default 0), w, h (default 256), ox, oy, freq, octaves, lac, gain, base,
 --   out (optional float[w*h]), clamp (default true).
@@ -1038,8 +1111,11 @@ function vnoise.fill_pipeline(state, kind, pipeline, opts)
   local sw, sh = w + 2 * rem, h + 2 * rem
   local cur = ffi.new("float[?]", sw * sh)
   local alt = ffi.new("float[?]", sw * sh)
+  local sp = not p.source and fillSampler(kind, opts, 2)
   if p.source then
     vnoise.fill_source(state, p.source, { c0 = c0 - rem, r0 = r0 - rem, w = sw, h = sh, out = cur })
+  elseif sp then
+    lib.vnoise_fill_sampler(state.s, sp, cur, c0 - rem, r0 - rem, sw, sh, domainFor(p.domain, opts))
   else
     lib.vnoise_fill_domain(
       state.s,
@@ -1087,35 +1163,6 @@ function vnoise.fill_pipeline(state, kind, pipeline, opts)
 end
 
 -- Samplers --------------------------------------------------------------------
-
--- Sampler kinds of fill_sampler and source leaves, mapped to their modes.
-local SAMPLER_KINDS = {
-  fbm = vnoise.MODE_FBM,
-  ridge = vnoise.MODE_RIDGE,
-  turb = vnoise.MODE_TURB,
-  cell_f1 = vnoise.MODE_CELL_F1,
-  cell_f2 = vnoise.MODE_CELL_F2,
-  cell_edge = vnoise.MODE_CELL_EDGE,
-  cell_value = vnoise.MODE_CELL_VALUE,
-  damped = vnoise.MODE_DAMPED,
-}
-
--- Builds a vnoise_sampler_t from `{ kind, base, octaves, lac, gain, jitter, damping }`.
-local function samplerStruct(spec, level)
-  local mode = SAMPLER_KINDS[spec.kind]
-  if not mode then
-    error("vnoise: unknown sampler kind '" .. tostring(spec.kind) .. "'", level + 1)
-  end
-  local sp = ffi.new("vnoise_sampler_t")
-  sp.mode = mode
-  sp.base = spec.base or vnoise.BASE_SIMPLEX2
-  sp.octaves = spec.octaves or 6
-  sp.lac = spec.lac or 2.0
-  sp.gain = spec.gain or 0.5
-  sp.jitter = spec.jitter or 1
-  sp.damping = spec.damping or 1
-  return sp
-end
 
 -- Folds a stride and a cell origin into a domain's affine map, so a native
 -- fill over cells (0 .. w - 1, 0 .. h - 1) samples the absolute cells

@@ -146,6 +146,48 @@ do
   ok("damping smooths the field", roughness(4) < roughness(0))
 end
 
+-- Every fill accepts every sampler kind ------------------------------------------
+
+do
+  local same = true
+  for _, kind in ipairs({ "damped", "cell_f1", "cell_f2", "cell_edge", "cell_value" }) do
+    local spec = { kind = kind, octaves = 3, jitter = 0.6, damping = 2 }
+    local opts = { w = 24, h = 24, freq = 0.07, octaves = 3, jitter = 0.6, damping = 2 }
+    local ref = vnoise.fill_sampler(s, spec, { w = 24, h = 24, freq = 0.07 })
+    local grid = vnoise.fill_grid(s, kind, opts)
+    same = same and blockDiff(ref, 24, grid, 0, 0, 24, 24) < 1e-6
+    local dom = { rotate = 25, warp = { amp = 3, freq = 0.05 } }
+    local a = vnoise.fill_domain(
+      s,
+      kind,
+      { c0 = 5, r0 = -2, w = 24, h = 24, freq = 0.07, octaves = 3, jitter = 0.6, damping = 2, domain = dom }
+    )
+    local b = vnoise.fill_sampler(s, spec, { c0 = 5, r0 = -2, w = 24, h = 24, freq = 0.07, domain = dom })
+    same = same and blockDiff(b, 24, a, 0, 0, 24, 24) < 1e-6
+    local p = vnoise.fill_pipeline(
+      s,
+      kind,
+      { domain = dom },
+      { c0 = 5, r0 = -2, w = 24, h = 24, freq = 0.07, octaves = 3, jitter = 0.6, damping = 2, clamp = false }
+    )
+    same = same and blockDiff(b, 24, p, 0, 0, 24, 24) < 1e-6
+  end
+  ok("fill_grid, fill_domain and fill_pipeline accept every sampler kind", same)
+  local jit_a = vnoise.fill_grid(s, "cell_f1", { w = 16, h = 16, freq = 0.1, jitter = 0 })
+  local jit_b = vnoise.fill_grid(s, "cell_f1", { w = 16, h = 16, freq = 0.1, jitter = 1 })
+  ok("fill options carry jitter", blockDiff(jit_a, 16, jit_b, 0, 0, 16, 16) > 1e-3)
+  ok("unknown kinds still raise", raises("voronoi", vnoise.fill_grid, s, "voronoi", { w = 2, h = 2 }))
+  local tiling = tilingDiff(64, 2, function(c0, r0, w, h)
+    return vnoise.fill_pipeline(
+      s,
+      "cell_edge",
+      { stages = { { "gaussian", 1 }, { "gullies" } } },
+      { c0 = c0, r0 = r0, w = w, h = h, freq = 0.05, jitter = 0.8 }
+    )
+  end)
+  ok("new kinds tile through pipelines", tiling < 1e-5)
+end
+
 -- Cellular ---------------------------------------------------------------------
 
 do
