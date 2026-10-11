@@ -1,7 +1,10 @@
-## ADDED Requirements
+# matrix-filters Specification
 
+## Purpose
+Define whole-matrix filters: stream-power erosion shared with terrain plans, pipeline stages applied to matrices with clamped edges, and resampling between matrix sizes.
+## Requirements
 ### Requirement: Erosion on a matrix
-The library SHALL export `vnoise_erode_matrix(float* m, int w, int h, const vnoise_erosion_t* ep, const float* uplift, float* flow_out)`. It SHALL run the terrain plan's stream-power erosion and hillslope diffusion on the matrix itself, with the parameters `iterations`, `reroute`, `k`, `m`, `dt`, `uplift_rate`, `diffusion` (≤ 0.25), `sea_level` and `outlets` (as in `terrain-plan`). `uplift` is an optional matrix. Above 1048576 cells, it SHALL erode a bilinear downsample of at most 1048576 cells and add the upsampled height change to the original. When `flow_out` is given, it SHALL receive `log(1 + A) / log(1 + A_max)`. The terrain plan SHALL share this implementation, and its outputs SHALL be bit-identical to those before this change.
+The library SHALL export `vnoise_erode_matrix(float* m, int w, int h, const vnoise_erosion_t* ep, const float* uplift, float* flow_out)`. It SHALL run the terrain plan's stream-power erosion and hillslope diffusion on the matrix itself, with the parameters `iterations`, `reroute`, `k`, `m`, `dt`, `uplift_rate`, `diffusion` (≤ 0.25), `sea_level`, `outlets` (as in `terrain-plan`) and `max_cells`. `uplift` is an optional matrix. Above `max_cells` cells (default 262144, at most 1048576), it SHALL erode a downsample of at most `max_cells` cells and add the bilinearly upsampled height change to the original, so the cost stays bounded. Each priority-flood over 1M cells takes about 100 ms, and erosion repeats it every `reroute` steps. When `flow_out` is given, it SHALL receive `log(1 + A) / log(1 + A_max)`. The terrain plan SHALL share this implementation, and its outputs SHALL be bit-identical to those before this change.
 
 #### Scenario: Valleys form
 - **WHEN** a noisy ridge matrix is eroded with 100 iterations
@@ -32,3 +35,4 @@ The library SHALL export `vnoise_resample(const float* src, int sw, int sh, floa
 #### Scenario: No overshoot
 - **WHEN** a step edge is upsampled ×4 with bicubic
 - **THEN** no value leaves the range of the input
+

@@ -1,5 +1,8 @@
-## ADDED Requirements
+# matrix-features Specification
 
+## Purpose
+Define positioned edits of a finite elevation matrix: point stamps (dome, cone, crater, mesa, basin) and features along polylines (ridge, valley, escarpment), their blends and seeded roughness, with values kept in 0..1.
+## Requirements
 ### Requirement: Matrix convention
 Matrix operations SHALL work on a row-major `float[w * h]` buffer with explicit `w` and `h`. Cell `(i, j)` has its center at `(i + 0.5, j + 0.5)` in matrix coordinates, and positions and lengths SHALL be given in those units. Every operation SHALL do nothing for NULL buffers or non-positive sizes. It SHALL clamp the values it writes to 0..1, and SHALL depend only on its inputs, parameters and seed.
 
@@ -41,10 +44,10 @@ Here `v = height * profile` (with the roughness surface factor), and `REPLACE` o
 - **THEN** every cell with `d <= 0.7` is 0.7 (within 1e-4)
 
 ### Requirement: Path features
-The library SHALL export `vnoise_path_feature(float* m, int w, int h, const float* points, int n, const vnoise_path_t* pf)`. `points` holds `n >= 2` pairs `x, y`; the polyline is smoothed with `smooth` Chaikin passes that keep its ends. The feature's fields are: `kind`, `height`, `width` (the full cross width in cells), `taper` (0..0.5 of the length), `sharpness`, `peakiness` (0..1), `spurs` (in cells), `roughness`, `seed`, `side` (+1 or -1, for escarpments) and `blend`. The kinds SHALL be:
+The library SHALL export `vnoise_path_feature(float* m, int w, int h, const float* points, int n, const vnoise_path_t* pf)`. `points` holds `n >= 2` pairs `x, y`; the polyline is smoothed with `smooth` Chaikin passes that keep its ends. The feature's fields are: `kind`, `height`, `width` (the full cross width in cells), `taper` (0..0.5 of the length), `sharpness`, `peakiness` (0..1), `spurs` (in cells), `roughness`, `seed`, `side` (+1 or -1, for escarpments), `reach` and `blend`. The kinds SHALL be:
 - `VNOISE_PATH_RIDGE`: a mountain range. Its value is `height * envelope(t) * cross(d) * peaks`. `t` is the arc-length parameter along the path, and `envelope` tapers to 0 over `taper` at both ends. `cross = (1 - (d / (width / 2))²)₊^sharpness`. `peaks` mixes 1 with seeded ridged noise along and across the path, by `peakiness`. `d` is warped by seeded fBm of amplitude `spurs`, so the flanks branch.
 - `VNOISE_PATH_VALLEY`: a trough with the ridge's envelope and cross section, without peaks, subtracted from the matrix.
-- `VNOISE_PATH_ESCARPMENT`: a step that raises the `side` of the line by `height * envelope(t) * smoothstep(0, width, d)`.
+- `VNOISE_PATH_ESCARPMENT`: a step that raises the `side` of the line by `height * envelope(t) * smoothstep(0, width, d) * (1 - smoothstep(reach - width, reach, d))`. `reach` (default `4 * width`) bounds the raised band, so cells farther than `reach` from the line are unchanged.
 
 Blends SHALL be as for stamps (valleys use `SUB` by default). The cost SHALL be proportional to the area of the path's bounding box grown by its width, using a bucket index of the segments.
 
@@ -66,3 +69,4 @@ The Lua binding SHALL provide `vnoise.stamp(m, w, h, spec)` and `vnoise.path_fea
 #### Scenario: Unknown shape
 - **WHEN** `vnoise.stamp` is called with `shape = "pyramid"`
 - **THEN** it raises an error that names `pyramid`
+

@@ -42,5 +42,6 @@ test: $(TARGET)
 	luajit tests/value_ops.lua
 	luajit tests/image_ops.lua
 	luajit tests/terrain.lua
+	luajit tests/matrix_ops.lua
 
 -include $(DEPS)

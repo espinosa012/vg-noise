@@ -86,7 +86,7 @@ Every write is clamped to 0..1.
 The hydrology internals move from `terrain_plan.cpp` to `hydrology.{h,cpp}`:
 - `Grid`, priority-flood, routing, stack order, accumulation, the stream-power step, diffusion, Chaikin.
 
-`vnoise_erode_matrix(h, w, h_, params, flow_out)` runs `iterations` steps with `reroute`, `k`, `m`, `dt`, `diffusion` and an optional uplift matrix, and writes the eroded heights. Above 1M cells, it erodes a bilinear downsample (to at most 1M cells), then adds the upsampled height change to the original. That keeps the detail, and the time stays bounded. It can also write the log-normalized flow accumulation, in 0..1, to `flow_out`. The plan's results must stay bit-identical after the move: its tests and a dump comparison check that.
+`vnoise_erode_matrix(h, w, h_, params, flow_out)` runs `iterations` steps with `reroute`, `k`, `m`, `dt`, `diffusion` and an optional uplift matrix, and writes the eroded heights. Above `max_cells` (default 512², at most 1M) cells, it erodes a downsample (to at most `max_cells` cells), then adds the upsampled height change to the original. That keeps the detail, and the time stays bounded. It can also write the log-normalized flow accumulation, in 0..1, to `flow_out`. The plan's results must stay bit-identical after the move: its tests and a dump comparison check that.
 
 ### 6. Stages on a matrix
 
@@ -110,3 +110,13 @@ Additive. Move the hydrology code first and verify the plan's bit-identity. Then
 ## Open Questions
 
 - Rivers with tributaries generated automatically from one source: no for now. Multiple sources plus junctions cover it.
+
+## Implementation notes
+
+- **Hydrology move:** `hydrology.{h,cpp}` holds the code moved verbatim from `terrain_plan.cpp`, parameterized by `sea_level`/`outlets` and `ErosionParams` instead of the plan params. Two reference plans (4096 cells / macro 32 with meanders; 2048 / 16 with edge outlets and `reroute = 1`) dump 257,015 values (grids, rivers, a filled block), and they are byte-identical before and after the move and after the whole change.
+- **`runStages`:** the stage loop of `fill_pipeline` is now a local function shared with `apply_stages`, which pads the matrix by the pipeline radius with clamped edges. Its interior equals a manual Gaussian within 1.2e-7.
+- **Erosion budget:** a priority-flood over 1M cells costs about 100 ms, so `max_cells` defaults to 512² (spec amended). Measured: 128², 100 iterations: 40 ms; 1024² or 2048² (eroded at 512²), 60 iterations: about 0.49 s.
+- **Escarpment `reach`:** without a bound the raised side covered the whole half-plane; `reach` (default 4 x width) fades it out (spec amended). The `side` sign follows the polyline helper: +1 is on the right of the travel direction as seen on screen (y down).
+- **Rivers:** the trace never revisits a cell. Pits and flats are breached by a bounded priority-flood in a `(2R + 1)²` window (R = `breach_radius`); an exhausted window marks its popped cells as lake (0.5). The channel written at the end overrides the lake value where it passes. At a junction the tributary's bed is raised to the junction cell's height (the main channel's bed), so it never digs below it.
+- **Timings at 1024²:** cone stamp 6 ms; 4-point ridge with spurs 32 ms; river 1–2 ms. `examples/matrix` (512², 7 steps): 590 ms in total, of which erosion is 470 ms.
+

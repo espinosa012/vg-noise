@@ -1088,6 +1088,36 @@ function vnoise.compile_pipeline(spec)
   )
 end
 
+-- Runs a compiled pipeline's stages on `cur` (sw x sh, its cell (0, 0) at
+-- absolute cell (ac0, ar0)), each kernel consuming its radius of apron; `alt`
+-- is a scratch buffer of the same size. Values stay unclamped. Returns the
+-- buffer holding the result (shrunk by the pipeline radius on every side).
+local function runStages(state, p, cur, alt, sw, sh, ac0, ar0)
+  for _, stage in ipairs(p.stages) do
+    local m = stage.mask
+    if stage.chain then
+      local chain = stage.chain
+      if m then
+        ffi.copy(alt, cur, sw * sh * ffi.sizeof("float"))
+      end
+      lib.vnoise_map_buffer(cur, sw * sh, chain.ops, chain.n, chain.data, 0)
+      if m then
+        lib.vnoise_mask_blend(cur, sw, sh, alt, sw, ac0, ar0, m.mask, m.data)
+      end
+    else
+      local r = stage.radius
+      local nw, nh = sw - 2 * r, sh - 2 * r
+      stage.run(cur, sw, sh, alt, ac0, ar0, state)
+      if m then
+        lib.vnoise_mask_blend(alt, nw, nh, cur + r * sw + r, sw, ac0 + r, ar0 + r, m.mask, m.data)
+      end
+      cur, alt = alt, cur
+      sw, sh, ac0, ar0 = nw, nh, ac0 + r, ar0 + r
+    end
+  end
+  return cur
+end
+
 --- Evaluates a pipeline for cells `(c0 .. c0 + w - 1, r0 .. r0 + h - 1)`.
 -- The noise is sampled through the pipeline's domain over the block grown by
 -- `pipeline.radius` on every side (the apron; from the pipeline's source
@@ -1132,28 +1162,7 @@ function vnoise.fill_pipeline(state, kind, pipeline, opts)
       opts.gain or 0.5
     )
   end
-  for _, stage in ipairs(p.stages) do
-    local m = stage.mask
-    if stage.chain then
-      local chain = stage.chain
-      if m then
-        ffi.copy(alt, cur, sw * sh * ffi.sizeof("float"))
-      end
-      lib.vnoise_map_buffer(cur, sw * sh, chain.ops, chain.n, chain.data, 0)
-      if m then
-        lib.vnoise_mask_blend(cur, sw, sh, alt, sw, c0 - rem, r0 - rem, m.mask, m.data)
-      end
-    else
-      local r = stage.radius
-      local nw, nh = sw - 2 * r, sh - 2 * r
-      stage.run(cur, sw, sh, alt, c0 - rem, r0 - rem, state)
-      if m then
-        lib.vnoise_mask_blend(alt, nw, nh, cur + r * sw + r, sw, c0 - rem + r, r0 - rem + r, m.mask, m.data)
-      end
-      cur, alt = alt, cur
-      sw, sh, rem = nw, nh, rem - r
-    end
-  end
+  cur = runStages(state, p, cur, alt, sw, sh, c0 - rem, r0 - rem)
   local out = opts.out or ffi.new("float[?]", w * h)
   ffi.copy(out, cur, w * h * ffi.sizeof("float"))
   if opts.clamp ~= false then
@@ -1775,6 +1784,319 @@ function vnoise.fill_terrain(state, plan, opts)
     res.channel_distance
   )
   return res
+end
+
+-- Matrix operations ------------------------------------------------------------
+
+ffi.cdef([[
+typedef struct {
+    int shape;
+    int blend;
+    float cx, cy;
+    float rx, ry;
+    float angle;
+    float height;
+    float roughness;
+    unsigned long long seed;
+    float p[4];
+} vnoise_stamp_t;
+void vnoise_stamp(float* m, int w, int h, const vnoise_stamp_t* st);
+
+typedef struct {
+    int kind;
+    int blend;
+    float height;
+    float width;
+    float taper;
+    float sharpness;
+    float peakiness;
+    float spurs;
+    float roughness;
+    float reach;
+    int side;
+    int smooth;
+    unsigned long long seed;
+} vnoise_path_t;
+void vnoise_path_feature(float* m, int w, int h, const float* points, int n, const vnoise_path_t* pf);
+
+typedef struct {
+    float sea_level;
+    float width0, width_growth, max_width;
+    float depth0, depth_growth, max_depth;
+    float valley, valley_shape, bank;
+    int breach_radius;
+    int smooth;
+    int max_length;
+} vnoise_river_t;
+int vnoise_river(float* height, int w, int h, float sx, float sy, const vnoise_river_t* rp,
+                 float* mask, float* out_points, int max_points);
+int vnoise_river_sources(const float* height, int w, int h, int count, float min_elev,
+                         float min_spacing, unsigned long long seed, float* out_xy);
+
+typedef struct {
+    int iterations;
+    int reroute;
+    float k, m, dt;
+    float uplift_rate;
+    float diffusion;
+    float sea_level;
+    int outlets;
+    int max_cells;
+} vnoise_erosion_t;
+void vnoise_erode_matrix(float* m, int w, int h, const vnoise_erosion_t* ep, const float* uplift,
+                         float* flow_out);
+void vnoise_resample(const float* src, int sw, int sh, float* dst, int dw, int dh, int mode);
+]])
+
+local BLENDS = { add = 0, sub = 1, max = 2, min = 3, replace = 4 }
+local STAMP_SHAPES = { dome = 0, cone = 1, crater = 2, mesa = 3, basin = 4 }
+local PATH_KINDS = { ridge = 0, valley = 1, escarpment = 2 }
+local RESAMPLE_MODES = { bilinear = 0, bicubic = 1 }
+local MATRIX_OUTLETS = { edges = 0, sea = 1, both = 2 }
+
+-- Reads a named choice, raising an error naming an unknown value.
+local function choice(map, value, default, what)
+  local v = map[value == nil and default or value]
+  if v == nil then
+    error("vnoise: unknown " .. what .. " '" .. tostring(value) .. "'", 3)
+  end
+  return v
+end
+
+-- Reads an optional finite number.
+local function num(t, key, default)
+  local v = t[key]
+  if v == nil then
+    return default
+  end
+  if type(v) ~= "number" or v ~= v or v == math.huge or v == -math.huge then
+    error("vnoise: '" .. key .. "' must be a finite number, got " .. tostring(v), 3)
+  end
+  return v
+end
+
+--- Allocates a matrix (row-major `float[w * h]`), optionally filled with a
+-- constant. Matrix operations take it with explicit `w` and `h`.
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param fill number|nil Initial value (default 0).
+-- @return cdata The matrix.
+function vnoise.matrix(w, h, fill)
+  local m = ffi.new("float[?]", w * h)
+  if fill and fill ~= 0 then
+    for k = 0, w * h - 1 do
+      m[k] = fill
+    end
+  end
+  return m
+end
+
+--- Stamps a point feature into a matrix. Positions and radii are in cells
+-- (cell (i, j) has its center at (i + 0.5, j + 0.5)); values written are
+-- clamped to 0..1.
+-- @param m cdata The matrix.
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param spec table shape ("dome", "cone", "crater", "mesa", "basin"), blend ("add", "sub",
+--   "max", "min", "replace"; default "add"), cx, cy, rx, ry (default rx), angle (degrees),
+--   height (0.3), roughness (0), seed (0), crater (cone: crater radius fraction, 0),
+--   rim (crater: rim width fraction, 0.3), floor (crater: floor height fraction, 0.2),
+--   slope (mesa: slope width fraction, 0.3).
+function vnoise.stamp(m, w, h, spec)
+  local st = ffi.new("vnoise_stamp_t")
+  st.shape = choice(STAMP_SHAPES, spec.shape, "dome", "stamp shape")
+  st.blend = choice(BLENDS, spec.blend, "add", "blend")
+  st.cx, st.cy = num(spec, "cx", w / 2), num(spec, "cy", h / 2)
+  st.rx = num(spec, "rx", math.min(w, h) / 8)
+  st.ry = num(spec, "ry", st.rx)
+  st.angle = num(spec, "angle", 0)
+  st.height = num(spec, "height", 0.3)
+  st.roughness = num(spec, "roughness", 0)
+  st.seed = spec.seed or 0
+  if st.shape == STAMP_SHAPES.cone then
+    st.p[0] = num(spec, "crater", 0)
+  elseif st.shape == STAMP_SHAPES.crater then
+    st.p[0], st.p[1] = num(spec, "rim", 0.3), num(spec, "floor", 0.2)
+  elseif st.shape == STAMP_SHAPES.mesa then
+    st.p[0] = num(spec, "slope", 0.3)
+  end
+  lib.vnoise_stamp(m, w, h, st)
+end
+
+--- Draws a feature along a polyline into a matrix.
+-- @param m cdata The matrix.
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param points table Lua array `{ x1, y1, x2, y2, ... }` (at least two points), in cells.
+-- @param spec table kind ("ridge", "valley", "escarpment"), blend (default "sub" for valleys,
+--   "add" otherwise), height (0.3), width (cells, 1/8 of the shorter side), taper (0.2),
+--   sharpness (1), peakiness (0.5 for ridges, else 0), spurs (cells, 0), roughness (0),
+--   side (+1/-1, escarpments), reach (escarpments, 4 * width), smooth (2), seed (0).
+function vnoise.path_feature(m, w, h, points, spec)
+  local n = math.floor(#points / 2)
+  if n < 2 then
+    return
+  end
+  local pf = ffi.new("vnoise_path_t")
+  pf.kind = choice(PATH_KINDS, spec.kind, "ridge", "path kind")
+  pf.blend = choice(BLENDS, spec.blend, pf.kind == PATH_KINDS.valley and "sub" or "add", "blend")
+  pf.height = num(spec, "height", 0.3)
+  pf.width = num(spec, "width", math.min(w, h) / 8)
+  pf.taper = num(spec, "taper", 0.2)
+  pf.sharpness = num(spec, "sharpness", 1)
+  pf.peakiness = num(spec, "peakiness", pf.kind == PATH_KINDS.ridge and 0.5 or 0)
+  pf.spurs = num(spec, "spurs", 0)
+  pf.roughness = num(spec, "roughness", 0)
+  pf.reach = num(spec, "reach", 0)
+  pf.side = (spec.side or 1) < 0 and -1 or 1
+  pf.smooth = spec.smooth or 2
+  pf.seed = spec.seed or 0
+  local pts = ffi.new("float[?]", 2 * n)
+  for k = 1, 2 * n do
+    pts[k - 1] = points[k]
+  end
+  lib.vnoise_path_feature(m, w, h, pts, n, pf)
+end
+
+--- Traces a river from a source down the slope, carving its channel into the
+-- height matrix and writing the river mask (1 in the channel, 0.5 for a lake
+-- where the river ends trapped).
+-- @param height cdata The height matrix (modified).
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param sx number Source x in cells.
+-- @param sy number Source y in cells.
+-- @param spec table|nil sea_level (0), width0 (1.5), width_growth (0.01), max_width (8),
+--   depth0 (0.004), depth_growth (0.00005), max_depth (0.03), valley (6), valley_shape (1),
+--   bank (1), breach_radius (64), smooth (2), max_length (4 * (w + h)).
+-- @param mask cdata|nil The river mask (allocated when nil).
+-- @return table The traced points `{ x1, y1, ... }` (empty when nothing was traced).
+-- @return cdata The mask.
+function vnoise.river(height, w, h, sx, sy, spec, mask)
+  spec = spec or {}
+  mask = mask or vnoise.matrix(w, h)
+  local rp = ffi.new("vnoise_river_t")
+  rp.sea_level = num(spec, "sea_level", 0)
+  rp.width0 = num(spec, "width0", 1.5)
+  rp.width_growth = num(spec, "width_growth", 0.01)
+  rp.max_width = num(spec, "max_width", 8)
+  rp.depth0 = num(spec, "depth0", 0.004)
+  rp.depth_growth = num(spec, "depth_growth", 0.00005)
+  rp.max_depth = num(spec, "max_depth", 0.03)
+  rp.valley = num(spec, "valley", 6)
+  rp.valley_shape = num(spec, "valley_shape", 1)
+  rp.bank = num(spec, "bank", 1)
+  rp.breach_radius = spec.breach_radius or 64
+  rp.smooth = spec.smooth or 2
+  rp.max_length = spec.max_length or 4 * (w + h)
+  local cap = 4 * rp.max_length + 8
+  local out = ffi.new("float[?]", 2 * cap)
+  local n = lib.vnoise_river(height, w, h, sx, sy, rp, mask, out, cap)
+  local points = {}
+  for k = 0, 2 * n - 1 do
+    points[k + 1] = out[k]
+  end
+  return points, mask
+end
+
+--- Picks seeded river sources on cells at or above `min_elev`, weighted by
+-- `height - min_elev`, at least `min_spacing` apart.
+-- @param height cdata The height matrix.
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param spec table count (1), min_elev (0.5), min_spacing (cells, 1/10 of the shorter side), seed (0).
+-- @return table `{ { x, y }, ... }` cell centers (possibly fewer than `count`).
+function vnoise.river_sources(height, w, h, spec)
+  spec = spec or {}
+  local count = spec.count or 1
+  local out = ffi.new("float[?]", 2 * math.max(count, 1))
+  local n = lib.vnoise_river_sources(
+    height,
+    w,
+    h,
+    count,
+    num(spec, "min_elev", 0.5),
+    num(spec, "min_spacing", math.min(w, h) / 10),
+    spec.seed or 0,
+    out
+  )
+  local list = {}
+  for k = 0, n - 1 do
+    list[k + 1] = { out[2 * k], out[2 * k + 1] }
+  end
+  return list
+end
+
+--- Erodes a matrix in place (stream-power erosion and hillslope diffusion, as
+-- in terrain plans). Above `max_cells` cells a downsample is eroded and the
+-- upsampled height change is added.
+-- @param m cdata The matrix (modified).
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param spec table|nil iterations (60), reroute (4), k (0.01), m (0.5), dt (1), uplift_rate
+--   (0.002), diffusion (0.01, <= 0.25), sea_level (0), outlets ("both"), max_cells (262144),
+--   uplift (optional matrix), flow (true to return the flow matrix).
+-- @return cdata|nil The flow matrix (log-normalized accumulation in 0..1) when `spec.flow`.
+function vnoise.erode(m, w, h, spec)
+  spec = spec or {}
+  local ep = ffi.new("vnoise_erosion_t")
+  ep.iterations = spec.iterations or 60
+  ep.reroute = spec.reroute or 4
+  ep.k = num(spec, "k", 0.01)
+  ep.m = num(spec, "m", 0.5)
+  ep.dt = num(spec, "dt", 1)
+  ep.uplift_rate = num(spec, "uplift_rate", 0.002)
+  ep.diffusion = num(spec, "diffusion", 0.01)
+  if ep.diffusion < 0 or ep.diffusion > 0.25 then
+    error("vnoise: erosion 'diffusion' must be in 0..0.25", 2)
+  end
+  ep.sea_level = num(spec, "sea_level", 0)
+  ep.outlets = choice(MATRIX_OUTLETS, spec.outlets, "both", "outlets")
+  ep.max_cells = spec.max_cells or 262144
+  local flow = spec.flow and vnoise.matrix(w, h) or nil
+  lib.vnoise_erode_matrix(m, w, h, ep, spec.uplift, flow)
+  return flow
+end
+
+--- Runs pipeline stages (point ops and kernels, with masks in matrix cells)
+-- on an existing matrix, in place. The matrix is padded by the stages' radius
+-- with clamped edges, so the result keeps its size and its edges are defined;
+-- values are clamped to 0..1.
+-- @param m cdata The matrix (modified).
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param stages table A stage list (as in `compile_pipeline`) or a compiled pipeline.
+-- @param state table|nil A state for position-dependent stages (`gullies`; default seed 0).
+function vnoise.apply_stages(m, w, h, stages, state)
+  local p = getmetatable(stages) == Pipeline and stages or vnoise.compile_pipeline({ stages = stages })
+  local R = p.radius
+  local sw, sh = w + 2 * R, h + 2 * R
+  local cur = ffi.new("float[?]", sw * sh)
+  local alt = ffi.new("float[?]", sw * sh)
+  for j = 0, sh - 1 do
+    local sj = math.min(math.max(j - R, 0), h - 1)
+    for i = 0, sw - 1 do
+      local si = math.min(math.max(i - R, 0), w - 1)
+      cur[j * sw + i] = m[sj * w + si]
+    end
+  end
+  local res = runStages(state or vnoise.new(0), p, cur, alt, sw, sh, -R, -R)
+  ffi.copy(m, res, w * h * ffi.sizeof("float"))
+  lib.vnoise_map_buffer(m, w * h, nil, 0, nil, 1)
+end
+
+--- Resamples a matrix to another size by cell centers.
+-- @param src cdata The source matrix.
+-- @param sw number Source columns.
+-- @param sh number Source rows.
+-- @param dw number Target columns.
+-- @param dh number Target rows.
+-- @param mode string|nil "bilinear" (default) or "bicubic" (clamped Catmull-Rom).
+-- @return cdata The new matrix.
+function vnoise.resample(src, sw, sh, dw, dh, mode)
+  local dst = ffi.new("float[?]", dw * dh)
+  lib.vnoise_resample(src, sw, sh, dst, dw, dh, choice(RESAMPLE_MODES, mode, "bilinear", "resample mode"))
+  return dst
 end
 
 -- Global statistics as point ops ----------------------------------------------

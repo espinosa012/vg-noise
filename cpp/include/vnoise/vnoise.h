@@ -437,6 +437,127 @@ VNOISE_API void vnoise_plan_fill(const vnoise_plan_t* plan, int c0, int r0, int 
                                  const float* detail, float* elevation, float* river,
                                  float* lake, float* flow, float* channel_distance);
 
+/* ------------------------------------------------------------------------
+ * Matrix operations: positioned edits of a finite row-major float[w * h]
+ * matrix. Cell (i, j) has its center at (i + 0.5, j + 0.5); positions and
+ * lengths are in cells. Every operation clamps what it writes to 0..1 and
+ * depends only on its inputs, parameters and seed. NULL buffers and
+ * non-positive sizes do nothing.
+ * ------------------------------------------------------------------------ */
+
+#define VNOISE_BLEND_ADD     0  /* m + v */
+#define VNOISE_BLEND_SUB     1  /* m - v */
+#define VNOISE_BLEND_MAX     2  /* max(m, v) */
+#define VNOISE_BLEND_MIN     3  /* min(m, v) (only inside the footprint) */
+#define VNOISE_BLEND_REPLACE 4  /* m + w (height - m), w the footprint weight */
+
+#define VNOISE_STAMP_DOME   0  /* (1 - d^2)^2 */
+#define VNOISE_STAMP_CONE   1  /* 1 - d, crater inside p[0] (fraction of the radius) */
+#define VNOISE_STAMP_CRATER 2  /* rim at 1 - p[0], floor at p[1] (fraction of height) */
+#define VNOISE_STAMP_MESA   3  /* flat to 1 - p[0], then a smoothstep to 0 */
+#define VNOISE_STAMP_BASIN  4  /* the dome profile applied downward (v = -height * profile) */
+
+/* A point stamp. d is the normalized elliptical distance after rotating by
+ * angle (degrees); roughness (0..1) perturbs the outline and the surface with
+ * seeded noise. */
+typedef struct {
+    int shape;
+    int blend;
+    float cx, cy;
+    float rx, ry;
+    float angle;
+    float height;
+    float roughness;
+    unsigned long long seed;
+    float p[4];
+} vnoise_stamp_t;
+
+VNOISE_API void vnoise_stamp(float* m, int w, int h, const vnoise_stamp_t* st);
+
+#define VNOISE_PATH_RIDGE      0  /* mountain range along the line */
+#define VNOISE_PATH_VALLEY     1  /* trough (subtracted by default) */
+#define VNOISE_PATH_ESCARPMENT 2  /* step raising one side, bounded by reach */
+
+/* A feature along a polyline of n >= 2 points (x, y pairs), smoothed with
+ * `smooth` Chaikin passes. width is the full cross width in cells; taper
+ * (0..0.5) fades the ends; sharpness shapes the cross profile; peakiness
+ * (0..1) mixes in seeded ridged peaks; spurs (cells) warps the distance so
+ * flanks branch; side (+1/-1) picks the raised side of an escarpment. */
+typedef struct {
+    int kind;
+    int blend;
+    float height;
+    float width;
+    float taper;
+    float sharpness;
+    float peakiness;
+    float spurs;
+    float roughness;
+    float reach;
+    int side;
+    int smooth;
+    unsigned long long seed;
+} vnoise_path_t;
+
+VNOISE_API void vnoise_path_feature(float* m, int w, int h, const float* points, int n,
+                                    const vnoise_path_t* pf);
+
+/* A river traced from (sx, sy) down the steepest descent, breaching pits
+ * through their lowest spill point (bounded local flood of breach_radius
+ * cells; beyond it the river ends in a lake marked 0.5 in the mask). It stops
+ * below sea_level, at the edge, at a cell whose mask is >= 0.75 (a junction)
+ * or after max_length cells. The smoothed path's bed (height minus a depth
+ * growing along the course) never rises downstream; the channel (width
+ * growing from width0) is carved with a valley of `valley` cells and
+ * valley_shape, and written to the mask (1 in the channel, fading over
+ * `bank`). Writes up to max_points points and returns their count. */
+typedef struct {
+    float sea_level;
+    float width0, width_growth, max_width;
+    float depth0, depth_growth, max_depth;
+    float valley, valley_shape, bank;
+    int breach_radius;
+    int smooth;
+    int max_length;
+} vnoise_river_t;
+
+VNOISE_API int vnoise_river(float* height, int w, int h, float sx, float sy,
+                            const vnoise_river_t* rp, float* mask,
+                            float* out_points, int max_points);
+
+/* Up to `count` seeded sources on cells >= min_elev (weighted by
+ * height - min_elev), at least min_spacing apart; returns how many were found
+ * (x, y pairs of cell centers in out_xy). */
+VNOISE_API int vnoise_river_sources(const float* height, int w, int h, int count,
+                                    float min_elev, float min_spacing,
+                                    unsigned long long seed, float* out_xy);
+
+/* Stream-power erosion and hillslope diffusion on the matrix itself (the
+ * terrain plan's implementation). Above max_cells (default 262144 when 0, at
+ * most 1048576) a downsample is eroded and the upsampled height change added.
+ * uplift (optional matrix) scales uplift_rate per cell; flow_out (optional)
+ * receives log(1 + A) / log(1 + A_max). */
+typedef struct {
+    int iterations;
+    int reroute;
+    float k, m, dt;
+    float uplift_rate;
+    float diffusion;
+    float sea_level;
+    int outlets;
+    int max_cells;
+} vnoise_erosion_t;
+
+VNOISE_API void vnoise_erode_matrix(float* m, int w, int h, const vnoise_erosion_t* ep,
+                                    const float* uplift, float* flow_out);
+
+#define VNOISE_RESAMPLE_BILINEAR 0
+#define VNOISE_RESAMPLE_BICUBIC  1
+/* Scales src (sw x sh) into dst (dw x dh) by cell centers; bicubic is
+ * Catmull-Rom clamped to the 2 x 2 neighborhood (no overshoot). */
+VNOISE_API void vnoise_resample(const float* src, int sw, int sh, float* dst, int dw, int dh,
+                                int mode);
+
 #ifdef __cplusplus
 }
 #endif

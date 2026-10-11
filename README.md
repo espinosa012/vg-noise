@@ -263,6 +263,50 @@ block with all five outputs and a 6-octave detail source fills in about 0.35
 ms. Memory grows with the nodes and river segments, never with the extent.
 Rivers exist only inside the plan's finite extent.
 
+### Matrix operations (map authoring)
+
+Terrain plans decide where mountains and rivers go. For authored maps the
+library also offers **positioned edits of a finite matrix**: a row-major
+`float[w * h]` that each operation reads and modifies in place. Cell `(i, j)`
+has its center at `(i + 0.5, j + 0.5)`; positions and lengths are in cells.
+Every operation clamps what it writes to 0..1 and is deterministic for equal
+inputs, parameters and seed. A consumer (Ludum's Map Editor) keeps a list of
+steps and replays them from the first changed one.
+
+```lua
+local m = vnoise.fill_grid(state, "fbm", { w = 1024, h = 1024, freq = 1 / 300, ops = { { "remap", -1, 1 } } })
+vnoise.stamp(m, 1024, 1024, { shape = "cone", cx = 600, cy = 320, rx = 90, height = 0.4, crater = 0.15, roughness = 0.6 })
+vnoise.path_feature(m, 1024, 1024, { 100, 500, 400, 300, 700, 450 }, { kind = "ridge", width = 160, height = 0.35, spurs = 20 })
+vnoise.erode(m, 1024, 1024, { iterations = 60, sea_level = 0.3 })
+local mask = vnoise.matrix(1024, 1024)
+for _, src in ipairs(vnoise.river_sources(m, 1024, 1024, { count = 4, min_elev = 0.6, min_spacing = 150, seed = 7 })) do
+  vnoise.river(m, 1024, 1024, src[1], src[2], { sea_level = 0.3 }, mask)
+end
+vnoise.apply_stages(m, 1024, 1024, { { "gullies", scale = 8, strength = 0.03 } }, state)
+local small = vnoise.resample(m, 1024, 1024, 256, 256, "bicubic")
+```
+
+| Operation | What it does |
+|-----------|--------------|
+| `vnoise.stamp(m, w, h, spec)` | point feature: `dome`, `cone` (volcano, `crater` radius), `crater` (`rim`, `floor`), `mesa` (`slope`), `basin`; `cx`, `cy`, `rx`, `ry`, `angle`, `height`, `roughness` (seeded outline and surface noise), `seed` |
+| `vnoise.path_feature(m, w, h, points, spec)` | along a polyline (Chaikin-smoothed): `ridge` (mountain range: `width`, `taper`, `sharpness`, `peakiness` ridged peaks, `spurs` branching flanks), `valley`, `escarpment` (raises `side` +1/-1 up to `reach`) |
+| `vnoise.river(height, w, h, sx, sy, spec, mask)` | traces down the steepest descent, breaches pits through their spill point (bounded flood of `breach_radius`; beyond it the river ends in a lake, mask 0.5), stops at `sea_level`, the edge or an existing channel (mask ≥ 0.75), carves a channel whose bed never rises (width and depth grow along the course) and writes the mask; returns the points |
+| `vnoise.river_sources(height, w, h, spec)` | `count` seeded sources above `min_elev`, weighted by height, `min_spacing` apart |
+| `vnoise.erode(m, w, h, spec)` | the plan's stream-power erosion and diffusion on the matrix (optional `uplift` matrix, `flow = true` returns the log-normalized flow); above `max_cells` (default 512²) a downsample is eroded and the height change upsampled |
+| `vnoise.apply_stages(m, w, h, stages, state)` | any pipeline stages (point ops, kernels, masks in matrix cells) on the matrix, with clamped-edge padding |
+| `vnoise.resample(src, sw, sh, dw, dh, mode)` | `bilinear` or `bicubic` (clamped Catmull-Rom, no overshoot) |
+
+Blends (`blend` in stamps and paths): `add` (default; `sub` for valleys),
+`sub`, `max`, `min` (inside the footprint) and `replace` (toward `height`,
+weighted by the footprint). C: `vnoise_stamp`, `vnoise_path_feature`,
+`vnoise_river`, `vnoise_river_sources`, `vnoise_erode_matrix`,
+`vnoise_resample`; the hydrology is shared with terrain plans
+(`cpp/src/hydrology.{h,cpp}`).
+
+Cost at 1024² (Apple M-series): a cone stamp about 6 ms, a 4-point ridge
+about 32 ms, a river about 1–2 ms, erosion with 60 iterations about 0.5 s
+(eroded at 512²).
+
 ### Determinism
 
 - Same seed produces the **same output within the same build**
@@ -348,6 +392,7 @@ specific instruction set extensions.
 ```sh
 love examples/love2d
 love examples/terrain     # terrain plan preview: R new seed, 1-3 views, E erosion, M meanders
+love examples/matrix      # matrix authoring: 1-7 show each step, R new seed
 ```
 
 Opens a 1024×768 window showing two things side by side:
@@ -525,16 +570,23 @@ cpp/
   src/terrain_plan.h          Private terrain plan layout
   src/terrain_plan.cpp        Plan build: erosion, drainage, rivers, index
   src/terrain_fill.cpp        Per-block multi-output plan evaluation
+  src/hydrology.{h,cpp}       Shared flood, routing, accumulation, erosion, Chaikin
+  src/polyline.h              Nearest-segment queries with a bucket index
+  src/matrix_features.cpp     Stamps and path features on matrices
+  src/matrix_rivers.cpp       Rivers and random sources on matrices
+  src/matrix_filters.cpp      Matrix erosion and resampling
 lua/vnoise.lua                LuaJIT FFI binding + ergonomic wrappers
 examples/love2d/conf.lua      Love2D config (1024x768 window)
 examples/love2d/main.lua      Demo: texture + isometric mesh
 examples/terrain/main.lua     Demo: terrain plan preview (erosion, rivers, lakes)
+examples/matrix/main.lua      Demo: step-by-step matrix authoring
 tests/smoke.lua              18 luajit checks (range, determinism,
                               batch==per-point, clamping, invalid base)
 tests/determinism.lua        Bit-identity cross-run + clamping
 tests/value_ops.lua          Value-op chains (make test)
 tests/image_ops.lua          Domain, kernels, masks, pipelines (make test)
 tests/terrain.lua            Samplers, sources, gullies, terrain plans (make test)
+tests/matrix_ops.lua         Stamps, path features, rivers, matrix filters (make test)
 Makefile                     Cross-platform build, no CMake
 README.md                    This file
 ```
