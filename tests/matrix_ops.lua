@@ -197,6 +197,11 @@ do
   local _, bm = vnoise.river(b, W, H, 140.5, 100.5, { sea_level = 0, breach_radius = 32 })
   -- The channel ends at the pit (mask 1 there); other basin cells are lake.
   ok("a river trapped in a wide basin ends in a lake", bm[120 * W + 100] == 0.5)
+  -- Only cells below the spill level are lake: a window corner (higher than
+  -- the lowest border cell of a round basin) is not.
+  -- The flood window is centered on the pit (100, 100) with radius 32; its
+  -- corner (68, 68) lies above the lowest border cell, so it is not lake.
+  ok("the lake stops at the spill level", bm[68 * W + 68] ~= 0.5 and bm[120 * W + 100] == 0.5)
 
   -- Junction: a second river stops at the first channel.
   local j = slope(W, H)

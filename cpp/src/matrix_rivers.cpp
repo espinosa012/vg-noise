@@ -25,7 +25,7 @@ enum Breach { BREACH_FOUND, BREACH_LAKE };
 // cells are popped lowest first; the first popped cell lower than the pit, on
 // the edge, below sea level or on an existing channel ends the search, and the
 // back-pointers give the spill path. If the window is exhausted, the popped
-// cells form a lake.
+// cells below the lowest border cell (the spill level) form a lake.
 Breach breach(const float* hgt, int w, int h, int start, int R, float sea, const float* mask,
               std::vector<int>& path_out, std::vector<int>& lake_out) {
     const int sx = start % w, sy = start / w;
@@ -71,6 +71,22 @@ Breach breach(const float* hgt, int w, int h, int start, int R, float sea, const
             open.push(Item(hgt[ny * w + nx], nw));
         }
     }
+    // The window is exhausted without an exit: the water rises to the lowest
+    // cell reached on the window's border (where it would spill next), and
+    // only the popped cells below that level form the lake, not the whole
+    // window.
+    float level = 1e30f;
+    for (size_t k = 0; k < lake_out.size(); ++k) {
+        const int x = lake_out[k] % w, y = lake_out[k] / w;
+        if (x == sx - R || x == sx + R || y == sy - R || y == sy + R) {
+            if (hgt[lake_out[k]] < level) level = hgt[lake_out[k]];
+        }
+    }
+    std::vector<int> below;
+    for (size_t k = 0; k < lake_out.size(); ++k) {
+        if (hgt[lake_out[k]] < level) below.push_back(lake_out[k]);
+    }
+    lake_out.swap(below);
     return BREACH_LAKE;
 }
 
