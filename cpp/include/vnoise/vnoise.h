@@ -15,6 +15,19 @@
 extern "C" {
 #endif
 
+/* Calling convention rule: every exported function takes at most 8 integer
+ * or pointer arguments and at most 8 float arguments, so on arm64 and x86-64
+ * SysV every argument travels in a register. LuaJIT's JIT compiler can place
+ * stack-passed FFI arguments wrongly on macOS arm64 (a callee then reads a
+ * neighbouring stack slot, e.g. a garbage octave count), so functions that
+ * need more inputs take them through a struct pointer instead. */
+
+/* Upper bound on every octave count (fractal samplers, warp, cellular,
+ * damped, gullies). Larger values are clamped to it: beyond ~24 octaves the
+ * added detail is below float precision, and a corrupted count must not turn
+ * a fill into a multi-second loop. */
+#define VNOISE_MAX_OCTAVES 32
+
 typedef struct {
     unsigned int perm[512];
     unsigned long long seed;
@@ -86,27 +99,27 @@ VNOISE_API void turb3_fill_volume(const noise_state_t* s, int base,
                                    int w, int h, int d, float freq,
                                    int octaves, float lac, float gain);
 
+/* Image fills: each pixel is t = clamp01((noise - lo) / (hi - lo)) written as
+ * (r t, g t, b t, a), with the color packed as
+ * rgba = r | g << 8 | b << 16 | a << 24 (see VNOISE_RGBA). */
+#define VNOISE_RGBA(r, g, b, a) \
+    ((unsigned int)(r) | ((unsigned int)(g) << 8) | ((unsigned int)(b) << 16) | ((unsigned int)(a) << 24))
+
 VNOISE_API void fbm2_fill_imagedata_rgba8(const noise_state_t* s, int base,
                                           unsigned char* out, int w, int h,
                                           float ox, float oy, float freq,
                                           int octaves, float lac, float gain,
-                                          float lo, float hi,
-                                          unsigned char r, unsigned char g,
-                                          unsigned char b, unsigned char a);
+                                          float lo, float hi, unsigned int rgba);
 VNOISE_API void ridge2_fill_imagedata_rgba8(const noise_state_t* s, int base,
                                             unsigned char* out, int w, int h,
                                             float ox, float oy, float freq,
                                             int octaves, float lac, float gain,
-                                            float lo, float hi,
-                                            unsigned char r, unsigned char g,
-                                            unsigned char b, unsigned char a);
+                                            float lo, float hi, unsigned int rgba);
 VNOISE_API void turb2_fill_imagedata_rgba8(const noise_state_t* s, int base,
                                            unsigned char* out, int w, int h,
                                            float ox, float oy, float freq,
                                            int octaves, float lac, float gain,
-                                           float lo, float hi,
-                                           unsigned char r, unsigned char g,
-                                           unsigned char b, unsigned char a);
+                                           float lo, float hi, unsigned int rgba);
 
 /* Value operations: an ordered chain applied to noise values after sampling.
  * Each op reads up to four parameters from p[]; unused entries are ignored.
@@ -156,29 +169,31 @@ VNOISE_API void vnoise_map_buffer(float* buf, int count,
                                   const vnoise_op_t* ops, int n,
                                   const float* data, int clamp01);
 
+/* A compiled op chain: n ops and the LUT pool they index (NULL without LUT). */
+typedef struct {
+    const vnoise_op_t* ops;
+    int n;
+    const float* data;
+} vnoise_chain_t;
+
 /* Like *_fill_imagedata_rgba8, but each pixel is t = clamp01(chain(noise))
- * with the op chain (ops, n, data) in place of the lo/hi range. */
+ * with the op chain in place of the lo/hi range (a NULL chain or ops pointer
+ * is the empty chain). */
 VNOISE_API void fbm2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
                                               unsigned char* out, int w, int h,
                                               float ox, float oy, float freq,
                                               int octaves, float lac, float gain,
-                                              const vnoise_op_t* ops, int n, const float* data,
-                                              unsigned char r, unsigned char g,
-                                              unsigned char b, unsigned char a);
+                                              const vnoise_chain_t* chain, unsigned int rgba);
 VNOISE_API void ridge2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
                                                 unsigned char* out, int w, int h,
                                                 float ox, float oy, float freq,
                                                 int octaves, float lac, float gain,
-                                                const vnoise_op_t* ops, int n, const float* data,
-                                                unsigned char r, unsigned char g,
-                                                unsigned char b, unsigned char a);
+                                                const vnoise_chain_t* chain, unsigned int rgba);
 VNOISE_API void turb2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
                                                unsigned char* out, int w, int h,
                                                float ox, float oy, float freq,
                                                int octaves, float lac, float gain,
-                                               const vnoise_op_t* ops, int n, const float* data,
-                                               unsigned char r, unsigned char g,
-                                               unsigned char b, unsigned char a);
+                                               const vnoise_chain_t* chain, unsigned int rgba);
 
 
 /* Domain transform for absolute-cell sampling. Cell (c, r) is mapped by the
@@ -200,13 +215,27 @@ typedef struct {
 #define VNOISE_MODE_RIDGE 1
 #define VNOISE_MODE_TURB  2
 
+/* Sampler parameters shared by vnoise_fill_domain and vnoise_fill_sampler
+ * (modes VNOISE_MODE_*; the cellular and damped modes are defined below). */
+typedef struct {
+    int mode;
+    int base;
+    int octaves;
+    float lac, gain;
+    float jitter;
+    float damping;
+    float p[4];
+} vnoise_sampler_t;
+
 /* Fills out[j * w + i] with cell (c0 + i, r0 + j) through the domain d and a
- * fractal sampler of the given mode (VNOISE_MODE_*). A cell's value depends
- * only on its absolute index, so overlapping blocks agree. */
-VNOISE_API void vnoise_fill_domain(const noise_state_t* s, int base, int mode,
+ * fractal sampler: sp->mode (VNOISE_MODE_FBM, _RIDGE or _TURB), sp->base,
+ * sp->octaves, sp->lac and sp->gain (the other sampler fields are ignored;
+ * see vnoise_sampler_t). A cell's value depends only on its
+ * absolute index, so overlapping blocks agree. Does nothing for NULL
+ * pointers, non-positive sizes or another mode. */
+VNOISE_API void vnoise_fill_domain(const noise_state_t* s, const vnoise_sampler_t* sp,
                                    float* out, int c0, int r0, int w, int h,
-                                   const vnoise_domain_t* d,
-                                   int octaves, float lac, float gain);
+                                   const vnoise_domain_t* d);
 
 /* Neighborhood kernels, all in "valid" mode: they read a contiguous sw x sh
  * buffer and write a contiguous (sw - 2R) x (sh - 2R) one, where R is the
@@ -274,14 +303,14 @@ typedef struct {
     int invert;
     float feather;
     float p[4];
+    const float* data;  /* POLYGON vertex pool (x, y pairs), NULL otherwise */
 } vnoise_mask_t;
 
 /* dst[j * w + i] = before + m * (dst - before) for the cell
  * (c0 + i, r0 + j), with before = before_buf[j * before_stride + i]. */
 VNOISE_API void vnoise_mask_blend(float* dst, int w, int h,
                                   const float* before, int before_stride,
-                                  int c0, int r0, const vnoise_mask_t* mask,
-                                  const float* data);
+                                  int c0, int r0, const vnoise_mask_t* mask);
 
 /* ------------------------------------------------------------------------
  * Terrain building blocks
@@ -314,15 +343,7 @@ VNOISE_API float cellular2_eval(const noise_state_t* s, float x, float y, float 
 #define VNOISE_MODE_CELL_VALUE 6
 #define VNOISE_MODE_DAMPED     7
 
-typedef struct {
-    int mode;
-    int base;
-    int octaves;
-    float lac, gain;
-    float jitter;
-    float damping;
-    float p[4];
-} vnoise_sampler_t;
+
 
 /* Fills out[j * w + i] with the sampler at the point the domain d maps cell
  * (c0 + i, r0 + j) to (same mapping as vnoise_fill_domain). Does nothing for
@@ -419,23 +440,43 @@ VNOISE_API void vnoise_plan_info(const vnoise_plan_t* plan, int* mw, int* mh,
 /* Copies a macro grid (mw * mh floats). */
 VNOISE_API void vnoise_plan_grid(const vnoise_plan_t* plan, int which, float* out);
 
-/* Copies the river network: per polyline its first vertex, vertex count and
- * mouth (VNOISE_MOUTH_*); per vertex x, y (cells), flow, width, bed. Any
- * NULL array is skipped. */
-VNOISE_API void vnoise_plan_rivers(const vnoise_plan_t* plan, int* start, int* count, int* mouth,
-                                   float* x, float* y, float* flow, float* width, float* bed);
+/* Destination arrays of vnoise_plan_rivers: per polyline its first vertex,
+ * vertex count and mouth (VNOISE_MOUTH_*); per vertex x, y (cells), flow,
+ * width, bed. Any NULL array is skipped. */
+typedef struct {
+    int* start;
+    int* count;
+    int* mouth;
+    float* x;
+    float* y;
+    float* flow;
+    float* width;
+    float* bed;
+} vnoise_rivers_out_t;
+
+/* Copies the river network into the arrays of out. */
+VNOISE_API void vnoise_plan_rivers(const vnoise_plan_t* plan, const vnoise_rivers_out_t* out);
 
 /* Nearest river at cell (c, r) after the meander warp. Returns 1 and writes
  * out[0..4] = distance, bed, width, flow, polyline index; 0 when no segment
  * is indexed in the cell's bucket. */
 VNOISE_API int vnoise_plan_query(const vnoise_plan_t* plan, float c, float r, float* out);
 
+/* Output buffers of vnoise_plan_fill (w * h values each); NULL ones are
+ * skipped. */
+typedef struct {
+    float* elevation;
+    float* river;
+    float* lake;
+    float* flow;
+    float* channel_distance;
+} vnoise_terrain_out_t;
+
 /* Fills the block of cells (c0 .. c0 + w - 1, r0 .. r0 + h - 1). detail is
- * the detail source block (w * h values, clamped to [-1, 1]) or NULL; NULL
- * outputs are skipped. Every value is in [0, 1] and depends only on the cell. */
+ * the detail source block (w * h values, clamped to [-1, 1]) or NULL. Every
+ * value is in [0, 1] and depends only on the cell. */
 VNOISE_API void vnoise_plan_fill(const vnoise_plan_t* plan, int c0, int r0, int w, int h,
-                                 const float* detail, float* elevation, float* river,
-                                 float* lake, float* flow, float* channel_distance);
+                                 const float* detail, const vnoise_terrain_out_t* out);
 
 /* ------------------------------------------------------------------------
  * Matrix operations: positioned edits of a finite row-major float[w * h]

@@ -26,6 +26,7 @@ static inline float base3(const noise_state_t* s, int base,
 float fbm_sample(const noise_state_t* s, int base, float x, float y,
                  int octaves, float lac, float gain, int mode) {
     if (!s || octaves <= 0) return 0.0f;
+    octaves = clamp_octaves(octaves);
     float sum = 0.0f;
     float amp = 1.0f;
     float freq = 1.0f;
@@ -50,6 +51,7 @@ float fbm_sample(const noise_state_t* s, int base, float x, float y,
 float fbm_sample3(const noise_state_t* s, int base, float x, float y, float z,
                   int octaves, float lac, float gain, int mode) {
     if (!s || octaves <= 0) return 0.0f;
+    octaves = clamp_octaves(octaves);
     float sum = 0.0f;
     float amp = 1.0f;
     float freq = 1.0f;

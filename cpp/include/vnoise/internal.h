@@ -57,6 +57,11 @@ inline float hash_unit(unsigned int h) {
 void domain_point(const noise_state_t* s, const vnoise_domain_t* d, float c, float r,
                   float* x, float* y);
 
+// Octave count clamped to VNOISE_MAX_OCTAVES (every octave loop uses it).
+inline int clamp_octaves(int octaves) {
+    return octaves > VNOISE_MAX_OCTAVES ? VNOISE_MAX_OCTAVES : octaves;
+}
+
 // Per-octave domain offset shared by every fractal sum (see fbm.cpp).
 inline float octave_offset(int o, float k) {
     return (float)o * k;

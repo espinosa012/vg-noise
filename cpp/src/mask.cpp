@@ -71,14 +71,13 @@ float mask_weight(const vnoise_mask_t* m, const float* data, float x, float y, f
 
 extern "C" VNOISE_API void vnoise_mask_blend(float* dst, int w, int h,
                                              const float* before, int before_stride,
-                                             int c0, int r0, const vnoise_mask_t* mask,
-                                             const float* data) {
+                                             int c0, int r0, const vnoise_mask_t* mask) {
     if (!dst || !before || !mask || w <= 0 || h <= 0) return;
     for (int j = 0; j < h; ++j) {
         const float y = (float)(r0 + j);
         for (int i = 0; i < w; ++i) {
             const float b = before[j * before_stride + i];
-            float m = mask_weight(mask, data, (float)(c0 + i), y, b);
+            float m = mask_weight(mask, mask->data, (float)(c0 + i), y, b);
             if (mask->invert) m = 1.0f - m;
             float& o = dst[j * w + i];
             o = b + m * (o - b);

@@ -3,11 +3,15 @@
 // Absolute-cell sampling through a domain transform (see vnoise_domain_t).
 // Every value is computed from the cell's absolute index alone, so blocks
 // that overlap (chunks with an apron) agree on their shared cells.
-extern "C" VNOISE_API void vnoise_fill_domain(const noise_state_t* s, int base, int mode,
+// The fractal parameters come in a vnoise_sampler_t so that every argument
+// is passed in a register (see the calling convention rule in vnoise.h).
+extern "C" VNOISE_API void vnoise_fill_domain(const noise_state_t* s, const vnoise_sampler_t* sp,
                                               float* out, int c0, int r0, int w, int h,
-                                              const vnoise_domain_t* d,
-                                              int octaves, float lac, float gain) {
-    if (!s || !out || !d || w <= 0 || h <= 0) return;
+                                              const vnoise_domain_t* d) {
+    if (!s || !sp || !out || !d || w <= 0 || h <= 0) return;
+    if (sp->mode < VNOISE_MODE_FBM || sp->mode > VNOISE_MODE_TURB) return;
+    const int base = sp->base, mode = sp->mode, octaves = sp->octaves;
+    const float lac = sp->lac, gain = sp->gain;
     const float* m = d->m;
     const bool warp = d->warp_amp != 0.0f;
     for (int j = 0; j < h; ++j) {

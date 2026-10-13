@@ -44,6 +44,7 @@ extern "C" VNOISE_API void vnoise_gullies(const float* src, int sw, int sh, floa
                                           float scale, float strength, int octaves,
                                           float gain, float sharpness) {
     if (!src || !dst || !s || sw < 3 || sh < 3 || !(scale > 0.0f) || octaves <= 0) return;
+    octaves = vnoise::clamp_octaves(octaves);
     const int w = sw - 2, h = sh - 2;
     const unsigned int key = vnoise::seed_key(s);
     for (int j = 0; j < h; ++j) {

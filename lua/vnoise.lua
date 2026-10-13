@@ -97,23 +97,17 @@ void fbm2_fill_imagedata_rgba8(const noise_state_t* s, int base,
                                unsigned char* out, int w, int h,
                                float ox, float oy, float freq,
                                int octaves, float lac, float gain,
-                               float lo, float hi,
-                               unsigned char r, unsigned char g,
-                               unsigned char b, unsigned char a);
+                               float lo, float hi, unsigned int rgba);
 void ridge2_fill_imagedata_rgba8(const noise_state_t* s, int base,
                                  unsigned char* out, int w, int h,
                                  float ox, float oy, float freq,
                                  int octaves, float lac, float gain,
-                                 float lo, float hi,
-                                 unsigned char r, unsigned char g,
-                                 unsigned char b, unsigned char a);
+                                 float lo, float hi, unsigned int rgba);
 void turb2_fill_imagedata_rgba8(const noise_state_t* s, int base,
                                 unsigned char* out, int w, int h,
                                 float ox, float oy, float freq,
                                 int octaves, float lac, float gain,
-                                float lo, float hi,
-                                unsigned char r, unsigned char g,
-                                unsigned char b, unsigned char a);
+                                float lo, float hi, unsigned int rgba);
 
 typedef struct {
     int op;
@@ -123,27 +117,27 @@ typedef struct {
 float vnoise_apply_ops(float v, const vnoise_op_t* ops, int n, const float* data, int clamp01);
 void vnoise_map_buffer(float* buf, int count, const vnoise_op_t* ops, int n, const float* data, int clamp01);
 
+typedef struct {
+    const vnoise_op_t* ops;
+    int n;
+    const float* data;
+} vnoise_chain_t;
+
 void fbm2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
                                    unsigned char* out, int w, int h,
                                    float ox, float oy, float freq,
                                    int octaves, float lac, float gain,
-                                   const vnoise_op_t* ops, int n, const float* data,
-                                   unsigned char r, unsigned char g,
-                                   unsigned char b, unsigned char a);
+                                   const vnoise_chain_t* chain, unsigned int rgba);
 void ridge2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
                                      unsigned char* out, int w, int h,
                                      float ox, float oy, float freq,
                                      int octaves, float lac, float gain,
-                                     const vnoise_op_t* ops, int n, const float* data,
-                                     unsigned char r, unsigned char g,
-                                     unsigned char b, unsigned char a);
+                                     const vnoise_chain_t* chain, unsigned int rgba);
 void turb2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
                                     unsigned char* out, int w, int h,
                                     float ox, float oy, float freq,
                                     int octaves, float lac, float gain,
-                                    const vnoise_op_t* ops, int n, const float* data,
-                                    unsigned char r, unsigned char g,
-                                    unsigned char b, unsigned char a);
+                                    const vnoise_chain_t* chain, unsigned int rgba);
 
 typedef struct {
     float m[6];
@@ -153,10 +147,19 @@ typedef struct {
     int warp_base;
 } vnoise_domain_t;
 
-void vnoise_fill_domain(const noise_state_t* s, int base, int mode,
+typedef struct {
+    int mode;
+    int base;
+    int octaves;
+    float lac, gain;
+    float jitter;
+    float damping;
+    float p[4];
+} vnoise_sampler_t;
+
+void vnoise_fill_domain(const noise_state_t* s, const vnoise_sampler_t* sp,
                         float* out, int c0, int r0, int w, int h,
-                        const vnoise_domain_t* d,
-                        int octaves, float lac, float gain);
+                        const vnoise_domain_t* d);
 
 void vnoise_convolve(const float* src, int sw, int sh, float* dst, const float* kernel, int r);
 void vnoise_convolve_sep(const float* src, int sw, int sh, float* dst,
@@ -172,26 +175,17 @@ typedef struct {
     int invert;
     float feather;
     float p[4];
+    const float* data;
 } vnoise_mask_t;
 
 void vnoise_mask_blend(float* dst, int w, int h, const float* before, int before_stride,
-                       int c0, int r0, const vnoise_mask_t* mask, const float* data);
+                       int c0, int r0, const vnoise_mask_t* mask);
 ]])
 
 ffi.cdef([[
 float perlin2_deriv(const noise_state_t* s, float x, float y, float* dx, float* dy);
 float simplex2_deriv(const noise_state_t* s, float x, float y, float* dx, float* dy);
 float cellular2_eval(const noise_state_t* s, float x, float y, float jitter, int ret);
-
-typedef struct {
-    int mode;
-    int base;
-    int octaves;
-    float lac, gain;
-    float jitter;
-    float damping;
-    float p[4];
-} vnoise_sampler_t;
 
 void vnoise_fill_sampler(const noise_state_t* s, const vnoise_sampler_t* sp,
                          float* out, int c0, int r0, int w, int h, const vnoise_domain_t* d);
@@ -227,12 +221,29 @@ vnoise_plan_t* vnoise_plan_create(const vnoise_plan_params_t* params, const floa
 void vnoise_plan_destroy(vnoise_plan_t* plan);
 void vnoise_plan_info(const vnoise_plan_t* plan, int* mw, int* mh, int* polylines, int* vertices);
 void vnoise_plan_grid(const vnoise_plan_t* plan, int which, float* out);
-void vnoise_plan_rivers(const vnoise_plan_t* plan, int* start, int* count, int* mouth,
-                        float* x, float* y, float* flow, float* width, float* bed);
+typedef struct {
+    int* start;
+    int* count;
+    int* mouth;
+    float* x;
+    float* y;
+    float* flow;
+    float* width;
+    float* bed;
+} vnoise_rivers_out_t;
+
+typedef struct {
+    float* elevation;
+    float* river;
+    float* lake;
+    float* flow;
+    float* channel_distance;
+} vnoise_terrain_out_t;
+
+void vnoise_plan_rivers(const vnoise_plan_t* plan, const vnoise_rivers_out_t* out);
 int vnoise_plan_query(const vnoise_plan_t* plan, float c, float r, float* out);
 void vnoise_plan_fill(const vnoise_plan_t* plan, int c0, int r0, int w, int h,
-                      const float* detail, float* elevation, float* river,
-                      float* lake, float* flow, float* channel_distance);
+                      const float* detail, const vnoise_terrain_out_t* out);
 ]])
 
 local vnoise = {
@@ -494,6 +505,18 @@ local function fillSampler(kind, opts, level)
   }, level + 1)
 end
 
+-- Builds the sampler of a classic fractal kind ("fbm", "ridge", "turb") for
+-- `vnoise_fill_domain` from the fill options (`base`, `octaves`, `lac`, `gain`).
+local function classicSampler(kind, opts, level)
+  return samplerStruct({
+    kind = kind,
+    base = opts.base,
+    octaves = opts.octaves,
+    lac = opts.lac,
+    gain = opts.gain,
+  }, level + 1)
+end
+
 --- Fills a float[w*h] grid: cell (i, j) is sampled at (ox + i * freq, oy + j * freq).
 -- @param state table A state from `vnoise.new`.
 -- @param kind string Any sampler kind ("fbm", "ridge", "turb" use the dedicated grid fills;
@@ -587,6 +610,18 @@ local IMG_OPS_FNS = {
   turb = lib.turb2_fill_imagedata_ops_rgba8,
 }
 
+-- Packs `opts.r`, `g`, `b`, `a` (0..255, default 255) into the unsigned int
+-- the image fills take: r | g << 8 | b << 16 | a << 24.
+local function packRGBA(opts)
+  local function byte(v)
+    return bit.band(math.floor(v or 255), 0xff)
+  end
+  return ffi.cast(
+    "unsigned int",
+    bit.bor(byte(opts.r), bit.lshift(byte(opts.g), 8), bit.lshift(byte(opts.b), 16), bit.lshift(byte(opts.a), 24))
+  )
+end
+
 -- With opts.ops, fills through the chain remap(lo, hi) followed by opts.ops
 -- (one native pass); without it, maps [lo, hi] to [0, 255] as before.
 function vnoise.fill_imagedata(state, kind, img, opts)
@@ -602,6 +637,7 @@ function vnoise.fill_imagedata(state, kind, img, opts)
     if chain.n > 0 then
       ffi.copy(ops + 1, chain.ops, chain.n * ffi.sizeof("vnoise_op_t"))
     end
+    local full = ffi.new("vnoise_chain_t", { ops, chain.n + 1, chain.data })
     IMG_OPS_FNS[kind](
       state.s,
       opts.base or vnoise.BASE_SIMPLEX2,
@@ -614,13 +650,8 @@ function vnoise.fill_imagedata(state, kind, img, opts)
       opts.octaves or 6,
       opts.lac or 2.0,
       opts.gain or 0.5,
-      ops,
-      chain.n + 1,
-      chain.data,
-      opts.r or 255,
-      opts.g or 255,
-      opts.b or 255,
-      opts.a or 255
+      full,
+      packRGBA(opts)
     )
     return img
   end
@@ -638,10 +669,7 @@ function vnoise.fill_imagedata(state, kind, img, opts)
     opts.gain or 0.5,
     opts.lo or -1,
     opts.hi or 1,
-    opts.r or 255,
-    opts.g or 255,
-    opts.b or 255,
-    opts.a or 255
+    packRGBA(opts)
   )
   return img
 end
@@ -758,7 +786,7 @@ end
 --   domain, out (optional buffer), ops and clamp (as in fill_grid).
 -- @return cdata The filled float[w*h] buffer.
 function vnoise.fill_domain(state, kind, opts)
-  local mode = modeOf(kind)
+  modeOf(kind) -- raises for an unknown kind
   local w, h = opts.w or 256, opts.h or 256
   local out = opts.out or ffi.new("float[?]", w * h)
   local d = domainFor(vnoise.compile_domain(opts.domain), opts)
@@ -766,20 +794,7 @@ function vnoise.fill_domain(state, kind, opts)
   if sp then
     lib.vnoise_fill_sampler(state.s, sp, out, opts.c0 or 0, opts.r0 or 0, w, h, d)
   else
-    lib.vnoise_fill_domain(
-      state.s,
-      opts.base or vnoise.BASE_SIMPLEX2,
-      mode,
-      out,
-      opts.c0 or 0,
-      opts.r0 or 0,
-      w,
-      h,
-      d,
-      opts.octaves or 6,
-      opts.lac or 2.0,
-      opts.gain or 0.5
-    )
+    lib.vnoise_fill_domain(state.s, classicSampler(kind, opts, 2), out, opts.c0 or 0, opts.r0 or 0, w, h, d)
   end
   if opts.ops then
     local chain = vnoise.compile_ops(opts.ops)
@@ -990,7 +1005,8 @@ local MASK_TYPES = {
 -- (on the stage input), with optional `feather` (fade width inside the
 -- boundary, default 0) and `invert`.
 -- @param spec table The mask description.
--- @return table `{ mask = vnoise_mask_t, data = float[]|nil }`.
+-- @return table `{ mask = vnoise_mask_t, data = float[]|nil }` (`mask.data` points into
+--   `data`, which the table keeps alive).
 function vnoise.compile_mask(spec)
   local mtype = MASK_TYPES[spec[1]]
   if not mtype then
@@ -1007,6 +1023,7 @@ function vnoise.compile_mask(spec)
       error("vnoise: polygon mask needs at least three x, y pairs", 2)
     end
     data = floats(pts)
+    m.data = data
     m.p[0], m.p[1] = 0, #pts / 2
   else
     local count = mtype == vnoise.MASK_RANGE and 2 or 4
@@ -1102,14 +1119,14 @@ local function runStages(state, p, cur, alt, sw, sh, ac0, ar0)
       end
       lib.vnoise_map_buffer(cur, sw * sh, chain.ops, chain.n, chain.data, 0)
       if m then
-        lib.vnoise_mask_blend(cur, sw, sh, alt, sw, ac0, ar0, m.mask, m.data)
+        lib.vnoise_mask_blend(cur, sw, sh, alt, sw, ac0, ar0, m.mask)
       end
     else
       local r = stage.radius
       local nw, nh = sw - 2 * r, sh - 2 * r
       stage.run(cur, sw, sh, alt, ac0, ar0, state)
       if m then
-        lib.vnoise_mask_blend(alt, nw, nh, cur + r * sw + r, sw, ac0 + r, ar0 + r, m.mask, m.data)
+        lib.vnoise_mask_blend(alt, nw, nh, cur + r * sw + r, sw, ac0 + r, ar0 + r, m.mask)
       end
       cur, alt = alt, cur
       sw, sh, ac0, ar0 = nw, nh, ac0 + r, ar0 + r
@@ -1134,7 +1151,9 @@ end
 -- @return cdata The float[w*h] buffer.
 function vnoise.fill_pipeline(state, kind, pipeline, opts)
   local p = vnoise.compile_pipeline(pipeline)
-  local mode = not p.source and modeOf(kind)
+  if not p.source then
+    modeOf(kind) -- raises for an unknown kind
+  end
   local w, h = opts.w or 256, opts.h or 256
   local c0, r0 = opts.c0 or 0, opts.r0 or 0
   local rem = p.radius -- apron still around the current buffer
@@ -1149,17 +1168,13 @@ function vnoise.fill_pipeline(state, kind, pipeline, opts)
   else
     lib.vnoise_fill_domain(
       state.s,
-      opts.base or vnoise.BASE_SIMPLEX2,
-      mode,
+      classicSampler(kind, opts, 2),
       cur,
       c0 - rem,
       r0 - rem,
       sw,
       sh,
-      domainFor(p.domain, opts),
-      opts.octaves or 6,
-      opts.lac or 2.0,
-      opts.gain or 0.5
+      domainFor(p.domain, opts)
     )
   end
   cur = runStages(state, p, cur, alt, sw, sh, c0 - rem, r0 - rem)
@@ -1410,7 +1425,7 @@ local function evalLeafMask(node, c0, r0, w, h, out)
     out[k] = 1
   end
   local zero = ffi.new("float[?]", n)
-  lib.vnoise_mask_blend(out, w, h, zero, w, c0, r0, node.mask.mask, node.mask.data)
+  lib.vnoise_mask_blend(out, w, h, zero, w, c0, r0, node.mask.mask)
 end
 
 -- Fills `out` (w * h) with node `node` over the strided block of cells.
@@ -1716,7 +1731,7 @@ function Plan:rivers()
   local start, count, mouth = ffi.new("int[?]", np + 1), ffi.new("int[?]", np + 1), ffi.new("int[?]", np + 1)
   local x, y = ffi.new("float[?]", nv + 1), ffi.new("float[?]", nv + 1)
   local fl, wd, bd = ffi.new("float[?]", nv + 1), ffi.new("float[?]", nv + 1), ffi.new("float[?]", nv + 1)
-  lib.vnoise_plan_rivers(self.handle, start, count, mouth, x, y, fl, wd, bd)
+  lib.vnoise_plan_rivers(self.handle, ffi.new("vnoise_rivers_out_t", { start, count, mouth, x, y, fl, wd, bd }))
   local list = {}
   for k = 0, np - 1 do
     local poly = { points = {}, flow = {}, width = {}, bed = {}, mouth = MOUTHS[mouth[k]] }
@@ -1770,19 +1785,13 @@ function vnoise.fill_terrain(state, plan, opts)
   if plan.detail_source and (res.elevation or res.lake) then
     detail = vnoise.fill_source(state, plan.detail_source, { c0 = c0, r0 = r0, w = w, h = h })
   end
-  lib.vnoise_plan_fill(
-    plan.handle,
-    c0,
-    r0,
-    w,
-    h,
-    detail,
-    res.elevation,
-    res.river,
-    res.lake,
-    res.flow,
-    res.channel_distance
-  )
+  local outs = ffi.new("vnoise_terrain_out_t")
+  outs.elevation = res.elevation
+  outs.river = res.river
+  outs.lake = res.lake
+  outs.flow = res.flow
+  outs.channel_distance = res.channel_distance
+  lib.vnoise_plan_fill(plan.handle, c0, r0, w, h, detail, outs)
   return res
 end
 

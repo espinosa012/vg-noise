@@ -67,9 +67,13 @@ float bilinear(const std::vector<float>& grid, int mw, int mh, int i, int j, flo
 } // namespace
 
 extern "C" VNOISE_API void vnoise_plan_fill(const vnoise_plan_t* plan, int c0, int r0, int w, int h,
-                                            const float* detail, float* elevation, float* river,
-                                            float* lake, float* flow, float* channel_distance) {
-    if (!plan || w <= 0 || h <= 0) return;
+                                            const float* detail, const vnoise_terrain_out_t* out) {
+    if (!plan || !out || w <= 0 || h <= 0) return;
+    float* elevation = out->elevation;
+    float* river = out->river;
+    float* lake = out->lake;
+    float* flow = out->flow;
+    float* channel_distance = out->channel_distance;
     const vnoise_plan_params_t& p = plan->p;
     const int mw = plan->mw, mh = plan->mh;
     const float log_max = logf(1.0f + plan->flow_max);

@@ -325,9 +325,16 @@ VNOISE_API void vnoise_plan_grid(const vnoise_plan_t* plan, int which, float* ou
     }
 }
 
-VNOISE_API void vnoise_plan_rivers(const vnoise_plan_t* plan, int* start, int* count, int* mouth,
-                                   float* x, float* y, float* flow, float* width, float* bed) {
-    if (!plan) return;
+VNOISE_API void vnoise_plan_rivers(const vnoise_plan_t* plan, const vnoise_rivers_out_t* out) {
+    if (!plan || !out) return;
+    int* start = out->start;
+    int* count = out->count;
+    int* mouth = out->mouth;
+    float* x = out->x;
+    float* y = out->y;
+    float* flow = out->flow;
+    float* width = out->width;
+    float* bed = out->bed;
     for (size_t k = 0; k < plan->poly_start.size(); ++k) {
         if (start) start[k] = plan->poly_start[k];
         if (count) count[k] = plan->poly_count[k];

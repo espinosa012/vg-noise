@@ -76,8 +76,8 @@ holding a kink, at most `|Δslope| / (4 · (count - 1))`.
 
 C: `vnoise_op_t { int op; float p[4]; }` with `VNOISE_OP_*` ids,
 `vnoise_apply_ops(v, ops, n, data, clamp01)`, `vnoise_map_buffer(buf,
-count, ops, n, data, clamp01)` and `*_fill_imagedata_ops_rgba8` (op chain
-instead of `lo`/`hi`). `data` is a float pool that `VNOISE_OP_LUT` ops
+count, ops, n, data, clamp01)` and `*_fill_imagedata_ops_rgba8` (a
+`vnoise_chain_t { ops, n, data }` instead of `lo`/`hi`). `data` is a float pool that `VNOISE_OP_LUT` ops
 index into (`p[0]` = offset, `p[1]` = sample count; NULL when the chain has
 no table). Unknown op ids leave the value unchanged.
 
@@ -108,7 +108,8 @@ call or as any tiling of blocks gives the same values (up to float rounding).
 - **Domain transforms** move the sample point instead of resampling pixels,
   so they are exact: rotation, scaling, mirroring and translation about a
   pivot (an affine map in cell space) plus optional fBm domain warping.
-  C: `vnoise_domain_t`, `vnoise_fill_domain` (cells by absolute index);
+  C: `vnoise_domain_t`, `vnoise_fill_domain` (cells by absolute index; the
+  fractal parameters come in a `vnoise_sampler_t`);
   Lua: `vnoise.compile_domain(spec)`, `vnoise.fill_domain(state, kind, opts)`.
 - **Neighborhood kernels** work in *valid* mode: an `sw x sh` input gives
   `(sw - 2R) x (sh - 2R)`, `R` the kernel's border radius, and nothing outside
@@ -121,7 +122,8 @@ call or as any tiling of blocks gives the same values (up to float rounding).
 - **Masks** restrict a stage to a region: rectangle, ellipse, polygon (absolute
   cell coordinates) or a value range on the stage input, with optional
   `feather` (fade inside the boundary) and `invert`. The stage result is
-  `before + m * (after - before)`. C: `vnoise_mask_t`, `vnoise_mask_blend`.
+  `before + m * (after - before)`. C: `vnoise_mask_t` (a polygon's vertex pool
+  in its `data` field), `vnoise_mask_blend`.
 - **Pipelines** tie it together. `fill_pipeline` samples the block grown by the
   pipeline's total radius (the apron), runs the stages shrinking the buffer,
   and clamps the final values unless `clamp = false`. Consecutive unmasked
@@ -476,6 +478,18 @@ See `cpp/include/vnoise/vnoise.h`. All public functions are
 `__attribute__((visibility("default")))` on macOS/Linux, and is empty
 when consuming the header from C).
 
+**Calling convention.** No exported function takes more than 8 integer or
+pointer arguments or more than 8 float arguments, so on arm64 and x86-64 SysV
+every argument travels in a register. LuaJIT's JIT compiler can place
+stack-passed FFI arguments in the wrong slot on macOS arm64: the callee then
+reads a neighbouring slot, e.g. a garbage octave count, and a fill that takes
+milliseconds can take minutes. Functions with more inputs take them through a
+struct pointer (`vnoise_sampler_t`, `vnoise_chain_t`, `vnoise_rivers_out_t`,
+`vnoise_terrain_out_t`) or packed (`VNOISE_RGBA`). As a second safeguard,
+every octave count is clamped to `VNOISE_MAX_OCTAVES` (32). `tests/abi.lua`
+checks the binding's declarations and compares JIT-compiled calls with the
+interpreter.
+
 ```c
 typedef struct {
     unsigned int perm[512];
@@ -530,8 +544,7 @@ void fbm2_fill_imagedata_rgba8  (const noise_state_t*, int base,
                                  float ox, float oy, float freq,
                                  int octaves, float lac, float gain,
                                  float lo, float hi,
-                                 unsigned char r, unsigned char g,
-                                 unsigned char b, unsigned char a);
+                                 unsigned int rgba);  /* VNOISE_RGBA(r, g, b, a) */
 void ridge2_fill_imagedata_rgba8(...);
 void turb2_fill_imagedata_rgba8 (...);
 ```
@@ -587,6 +600,7 @@ tests/value_ops.lua          Value-op chains (make test)
 tests/image_ops.lua          Domain, kernels, masks, pipelines (make test)
 tests/terrain.lua            Samplers, sources, gullies, terrain plans (make test)
 tests/matrix_ops.lua         Stamps, path features, rivers, matrix filters (make test)
+tests/abi.lua                Register-only signatures, octave bound, JIT vs interpreter (make test)
 Makefile                     Cross-platform build, no CMake
 README.md                    This file
 ```

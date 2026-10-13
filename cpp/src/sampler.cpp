@@ -17,6 +17,7 @@ float base2_deriv(const noise_state_t* s, int base, float x, float y, float* dx,
 float damped_sample(const noise_state_t* s, int base, float x, float y,
                     int octaves, float lac, float gain, float damping) {
     if (!s || octaves <= 0) return 0.0f;
+    octaves = clamp_octaves(octaves);
     float sum = 0.0f, amp = 1.0f, freq = 1.0f, norm = 0.0f;
     float Dx = 0.0f, Dy = 0.0f;
     for (int o = 0; o < octaves; ++o) {

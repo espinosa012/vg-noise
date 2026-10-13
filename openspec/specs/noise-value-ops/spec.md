@@ -2,7 +2,9 @@
 
 ## Purpose
 Define the native value operations (remap, scale, offset, contrast, look-up table) applied to noise values in an ordered chain with a single optional final clamp, and how the C API and the Lua binding expose them.
+
 ## Requirements
+
 ### Requirement: Value operation set
 The library SHALL define a value operation as `vnoise_op_t { int op; float p[4]; }` and SHALL implement these ops, applied to a value `v`:
 - `VNOISE_OP_REMAP` (0): `(v - p[0]) / (p[1] - p[0])`; when `p[1] == p[0]` the result is `0`.
@@ -59,7 +61,7 @@ The library SHALL export `float vnoise_apply_ops(float v, const vnoise_op_t* ops
 - **THEN** every element equals `vnoise_apply_ops` of the original element with the same chain and clamp flag
 
 ### Requirement: Fused image fill with ops
-The library SHALL export `fbm2_fill_imagedata_ops_rgba8`, `ridge2_fill_imagedata_ops_rgba8` and `turb2_fill_imagedata_ops_rgba8`, taking the same arguments as the existing image fills but an op chain (`ops`, `n`, `data`) instead of `lo`/`hi`. Each pixel SHALL be `t = clamp01(chain(noise))` written as `(r·t, g·t, b·t, a)`, exactly as the existing fills write `t`.
+The library SHALL export `fbm2_fill_imagedata_ops_rgba8`, `ridge2_fill_imagedata_ops_rgba8` and `turb2_fill_imagedata_ops_rgba8`, taking the same arguments as the existing image fills but a `const vnoise_chain_t*` (`{ const vnoise_op_t* ops; int n; const float* data; }`, NULL for the empty chain) instead of `lo`/`hi`. In both families the color SHALL be one `unsigned int rgba = r | g << 8 | b << 16 | a << 24` (`VNOISE_RGBA`), the last argument. Each pixel SHALL be `t = clamp01(chain(noise))` written as `(r·t, g·t, b·t, a)`, exactly as the existing fills write `t`.
 
 #### Scenario: Equivalent to lo/hi fill
 - **WHEN** an image is filled with the ops variant and the chain `[remap(lo, hi)]`, and another with the existing fill and `lo`, `hi`
@@ -125,4 +127,3 @@ The Lua binding SHALL accept the names `"invert"`, `"threshold"`, `"smoothstep"`
 #### Scenario: Explicit clamp
 - **WHEN** the chain `[scale(3), clamp(0, 1), offset(-0.5)]` is applied to `0.5` without final clamp
 - **THEN** the result is `0.5`
-

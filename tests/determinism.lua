@@ -23,10 +23,7 @@ local function render(seed)
     0.5,
     -1,
     1,
-    255,
-    255,
-    255,
-    255
+    0xffffffff
   )
   return buf
 end
@@ -69,10 +66,7 @@ vnoise._lib.fbm2_fill_imagedata_rgba8(
   0.5,
   -1,
   1,
-  255,
-  255,
-  255,
-  255
+  0xffffffff
 )
 print("clamping white2 pixel: " .. buf[0] .. "," .. buf[1] .. "," .. buf[2] .. "," .. buf[3])
 

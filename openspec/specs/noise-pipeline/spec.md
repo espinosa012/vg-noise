@@ -2,7 +2,9 @@
 
 ## Purpose
 Define pipelines (domain plus ordered point and kernel stages with optional region masks) evaluated per block of absolute cells with an apron, so tiled blocks match a single evaluation, and the helpers that turn global statistics into point ops.
+
 ## Requirements
+
 ### Requirement: Pipeline compilation
 The Lua binding SHALL provide `vnoise.compile_pipeline(spec)` with `spec = { domain = <domain spec>, source = <source spec>, stages = { ... } }` (all optional), each stage `{ name, params..., mask = <mask spec> }` naming a point op or a kernel stage (including `gullies`). It SHALL return a compiled pipeline with the total border radius `radius` (sum of the stage radii) and SHALL raise an error naming an unknown stage, a bad parameter, or a radius above the kernel limits (median 7, others 32). A spec holding both `domain` and `source` SHALL raise an error (a source's leaves carry their own domains). A compiled pipeline passed again SHALL be returned unchanged.
 
@@ -38,7 +40,7 @@ The Lua binding SHALL provide `vnoise.compile_pipeline(spec)` with `spec = { dom
 - **THEN** its output is identical to the output before this change
 
 ### Requirement: Region masks
-A stage's `mask` SHALL be `{ "rect", x0, y0, x1, y1 }` (inclusive absolute cell bounds), `{ "ellipse", cx, cy, rx, ry }`, `{ "polygon", { x1, y1, x2, y2, ... } }` (at least three vertices, even-odd rule) or `{ "range", lo, hi }` (on the stage input), with optional `feather` (default 0) and `invert` (default false). The weight `m` SHALL be 1 inside and 0 outside, faded over `feather` inside the boundary, and `1 - m` when inverted; the stage result SHALL be `before + m * (after - before)`, `before` the stage input at the same cell. The C side SHALL export `vnoise_mask_blend` with `vnoise_mask_t`.
+A stage's `mask` SHALL be `{ "rect", x0, y0, x1, y1 }` (inclusive absolute cell bounds), `{ "ellipse", cx, cy, rx, ry }`, `{ "polygon", { x1, y1, x2, y2, ... } }` (at least three vertices, even-odd rule) or `{ "range", lo, hi }` (on the stage input), with optional `feather` (default 0) and `invert` (default false). The weight `m` SHALL be 1 inside and 0 outside, faded over `feather` inside the boundary, and `1 - m` when inverted; the stage result SHALL be `before + m * (after - before)`, `before` the stage input at the same cell. The C side SHALL export `vnoise_mask_blend(float* dst, int w, int h, const float* before, int before_stride, int c0, int r0, const vnoise_mask_t* mask)`; a polygon mask SHALL carry its vertex pool in `vnoise_mask_t.data`.
 
 #### Scenario: Rectangle mask
 - **WHEN** `invert` runs with mask `{ "rect", 2, 2, 5, 5 }` on a constant 0.2 block
@@ -66,4 +68,3 @@ The binding SHALL provide `vnoise.histogram(buf, count, bins, lo, hi)` (counts o
 #### Scenario: Equalization
 - **WHEN** the LUT is built from a buffer of values in 0..0.5
 - **THEN** it is non-decreasing, starts near 0 and reaches 1 at 0.5
-

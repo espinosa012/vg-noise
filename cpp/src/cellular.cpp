@@ -83,6 +83,7 @@ float cellular2(const noise_state_t* s, float x, float y, float jitter, int ret)
 float cellular_sample(const noise_state_t* s, float x, float y, int octaves,
                       float lac, float gain, float jitter, int ret) {
     if (!s || octaves <= 0) return 0.0f;
+    octaves = clamp_octaves(octaves);
     float sum = 0.0f, amp = 1.0f, freq = 1.0f, norm = 0.0f;
     for (int o = 0; o < octaves; ++o) {
         const float n = cellular2(s, x * freq + octave_offset(o, 31.4159f),

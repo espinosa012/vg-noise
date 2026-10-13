@@ -1,14 +1,18 @@
 #include "vnoise/internal.h"
 
+// The pixel color arrives packed in one unsigned int (VNOISE_RGBA) and the op
+// chain in a vnoise_chain_t, so every argument is passed in a register (see
+// the calling convention rule in vnoise.h).
+
 #define VNOISE_FILL_IMG_2D(NAME, MODE)                                                       \
 extern "C" VNOISE_API void NAME(const noise_state_t* s, int base,                             \
                                 unsigned char* out, int w, int h,                            \
                                 float ox, float oy, float freq,                              \
                                 int octaves, float lac, float gain,                          \
-                                float lo, float hi,                                           \
-                                unsigned char r, unsigned char g,                            \
-                                unsigned char b, unsigned char a) {                           \
+                                float lo, float hi, unsigned int rgba) {                     \
     if (!s || !out || w <= 0 || h <= 0) return;                                              \
+    const unsigned char r = rgba & 0xff, g = (rgba >> 8) & 0xff;                             \
+    const unsigned char b = (rgba >> 16) & 0xff, a = (rgba >> 24) & 0xff;                    \
     const float inv = 1.0f / (hi - lo);                                                     \
     for (int j = 0; j < h; ++j) {                                                            \
         float y = oy + (float)j * freq;                                                      \
@@ -31,17 +35,19 @@ VNOISE_FILL_IMG_2D(ridge2_fill_imagedata_rgba8, vnoise::RIDGE)
 VNOISE_FILL_IMG_2D(turb2_fill_imagedata_rgba8,  vnoise::TURB)
 
 // Same pixel writes as VNOISE_FILL_IMG_2D, with t taken from an op chain
-// (always clamped; data is the LUT pool) instead of the lo/hi range.
+// (always clamped; chain->data is the LUT pool) instead of the lo/hi range.
 #define VNOISE_FILL_IMG_OPS_2D(NAME, MODE)                                                   \
 extern "C" VNOISE_API void NAME(const noise_state_t* s, int base,                             \
                                 unsigned char* out, int w, int h,                            \
                                 float ox, float oy, float freq,                              \
                                 int octaves, float lac, float gain,                          \
-                                const vnoise_op_t* ops, int n, const float* data,            \
-                                unsigned char r, unsigned char g,                            \
-                                unsigned char b, unsigned char a) {                           \
+                                const vnoise_chain_t* chain, unsigned int rgba) {            \
     if (!s || !out || w <= 0 || h <= 0) return;                                              \
-    if (!ops) n = 0;                                                                         \
+    const vnoise_op_t* ops = chain ? chain->ops : nullptr;                                   \
+    const int n = ops ? chain->n : 0;                                                        \
+    const float* data = chain ? chain->data : nullptr;                                       \
+    const unsigned char r = rgba & 0xff, g = (rgba >> 8) & 0xff;                             \
+    const unsigned char b = (rgba >> 16) & 0xff, a = (rgba >> 24) & 0xff;                    \
     for (int j = 0; j < h; ++j) {                                                            \
         float y = oy + (float)j * freq;                                                      \
         for (int i = 0; i < w; ++i) {                                                         \
