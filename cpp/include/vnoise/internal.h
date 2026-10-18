@@ -4,7 +4,16 @@
 #include <cmath>
 #include "vnoise/vnoise.h"
 
+struct vnoise_image_t {
+    int w, h;
+    float* data; // w * h, row 0 at the top
+};
+
 namespace vnoise {
+
+// Samples an image at (x, y) in pixel units (integers are pixel values) with a
+// VNOISE_WRAP_* mode and a VNOISE_FILTER_* kind.
+float image_sample(const vnoise_image_t* img, float x, float y, int wrap, int filter);
 
 inline unsigned long long splitmix64(unsigned long long* state) {
     unsigned long long z = (state[0] += 0x9E3779B97F4A7C15ULL);

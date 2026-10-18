@@ -217,6 +217,10 @@ typedef struct {
 
 /* Sampler parameters shared by vnoise_fill_domain and vnoise_fill_sampler
  * (modes VNOISE_MODE_*; the cellular and damped modes are defined below). */
+/* A grayscale image used as a noise field (see VNOISE_MODE_IMAGE). Opaque;
+ * values are floats in 0..1. */
+typedef struct vnoise_image_t vnoise_image_t;
+
 typedef struct {
     int mode;
     int base;
@@ -225,6 +229,10 @@ typedef struct {
     float jitter;
     float damping;
     float p[4];
+    /* VNOISE_MODE_IMAGE only: the image (borrowed, must outlive the fill),
+     * a VNOISE_WRAP_* mode and a VNOISE_FILTER_* kind. */
+    const vnoise_image_t* image;
+    int wrap, filter;
 } vnoise_sampler_t;
 
 /* Fills out[j * w + i] with cell (c0 + i, r0 + j) through the domain d and a
@@ -342,6 +350,19 @@ VNOISE_API float cellular2_eval(const noise_state_t* s, float x, float y, float 
 #define VNOISE_MODE_CELL_EDGE  5
 #define VNOISE_MODE_CELL_VALUE 6
 #define VNOISE_MODE_DAMPED     7
+/* IMAGE reads sp->image at the sample point (x, y) in pixel units: integer
+ * coordinates are pixel values, so a domain with freq 1 and no transform maps
+ * cell (c, r) to pixel (c, r). Octaves, lac and gain are ignored. Outside the
+ * image the wrap mode applies; a NULL image fills zeros. */
+#define VNOISE_MODE_IMAGE      8
+
+#define VNOISE_WRAP_CLAMP  0
+#define VNOISE_WRAP_REPEAT 1
+#define VNOISE_WRAP_MIRROR 2
+
+#define VNOISE_FILTER_NEAREST  0
+#define VNOISE_FILTER_BILINEAR 1
+#define VNOISE_FILTER_BICUBIC  2  /* Catmull-Rom; may overshoot 0..1 slightly */
 
 
 
@@ -351,6 +372,29 @@ VNOISE_API float cellular2_eval(const noise_state_t* s, float x, float y, float 
 VNOISE_API void vnoise_fill_sampler(const noise_state_t* s, const vnoise_sampler_t* sp,
                                     float* out, int c0, int r0, int w, int h,
                                     const vnoise_domain_t* d);
+
+/* Image fields. Loads a PNG, JPEG, BMP, TGA or PGM/PNM file as grayscale
+ * (colour is converted to luminance; 16-bit files keep their precision) into
+ * floats in 0..1, row 0 at the top. Returns NULL on failure, with the reason
+ * in vnoise_image_error(). Free with vnoise_image_free. */
+VNOISE_API vnoise_image_t* vnoise_image_load(const char* path);
+
+/* Builds an image from raw pixels (row-major, top row first) with `channels`
+ * interleaved channels of `bytes` bytes each: 1 (unsigned 8 bit, /255),
+ * 2 (unsigned 16 bit native endian, /65535) or 4 (float, kept as is). One and
+ * two channels use the first channel; three and four use luminance of the
+ * first three (alpha ignored). Returns NULL for bad sizes or formats; the
+ * pixels are copied. */
+VNOISE_API vnoise_image_t* vnoise_image_from_pixels(const void* data, int w, int h,
+                                                    int channels, int bytes);
+
+VNOISE_API void vnoise_image_free(vnoise_image_t* img);
+VNOISE_API int vnoise_image_width(const vnoise_image_t* img);
+VNOISE_API int vnoise_image_height(const vnoise_image_t* img);
+/* The w * h floats (owned by the image); NULL for a NULL image. */
+VNOISE_API const float* vnoise_image_data(const vnoise_image_t* img);
+/* Reason of the last failed vnoise_image_load (not thread safe). */
+VNOISE_API const char* vnoise_image_error(void);
 
 /* Buffer combinators used by source trees, dst[k] op= src[k] for k < count:
  *   SET dst = w src     ADD dst += w src   MUL dst *= src    MIN, MAX

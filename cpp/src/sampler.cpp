@@ -48,6 +48,8 @@ static inline float sample(const noise_state_t* s, const vnoise_sampler_t* sp, f
                                sp->mode - VNOISE_MODE_CELL_F1);
     case VNOISE_MODE_DAMPED:
         return damped_sample(s, sp->base, x, y, sp->octaves, sp->lac, sp->gain, sp->damping);
+    case VNOISE_MODE_IMAGE:
+        return image_sample(sp->image, x, y, sp->wrap, sp->filter);
     default:
         return 0.0f;
     }
@@ -59,7 +61,7 @@ extern "C" VNOISE_API void vnoise_fill_sampler(const noise_state_t* s, const vno
                                                float* out, int c0, int r0, int w, int h,
                                                const vnoise_domain_t* d) {
     if (!s || !sp || !out || !d || w <= 0 || h <= 0) return;
-    if (sp->mode < VNOISE_MODE_FBM || sp->mode > VNOISE_MODE_DAMPED) return;
+    if (sp->mode < VNOISE_MODE_FBM || sp->mode > VNOISE_MODE_IMAGE) return;
     for (int j = 0; j < h; ++j) {
         const float r = (float)(r0 + j);
         for (int i = 0; i < w; ++i) {
