@@ -199,16 +199,24 @@ VNOISE_API void turb2_fill_imagedata_ops_rgba8(const noise_state_t* s, int base,
 /* Domain transform for absolute-cell sampling. Cell (c, r) is mapped by the
  * affine m (c' = m0 c + m1 r + m2, r' = m3 c + m4 r + m5), then displaced by
  * warp_amp times two fBm samples of a warp field (base warp_base,
- * warp_octaves octaves, lacunarity 2, gain 0.5) at
- * (c' * warp_freq + 5.2, r' * warp_freq + 1.3) and
+ * warp_octaves octaves, lacunarity warp_lac, gain warp_gain; 0 selects the
+ * defaults 2 and 0.5) at (c' * warp_freq + 5.2, r' * warp_freq + 1.3) and
  * (c' * warp_freq + 1.7, r' * warp_freq + 9.2) when warp_amp != 0, and
- * finally evaluated at (ox + c'' * freq, oy + r'' * freq). */
+ * finally evaluated at (ox + c'' * freq, oy + r'' * freq).
+ *
+ * warp_levels > 1 iterates the warp (Quilez' f(p + a r), r = g(p + a q),
+ * q = g(p)): level k samples the warp field at the point displaced by level
+ * k - 1, with its own offsets, and the last level's displacement is applied.
+ * 0 and 1 are one level (the original warp); at most VNOISE_MAX_WARP_LEVELS. */
+#define VNOISE_MAX_WARP_LEVELS 4
 typedef struct {
     float m[6];
     float ox, oy, freq;
     float warp_amp, warp_freq;
     int warp_octaves;
     int warp_base;
+    int warp_levels;
+    float warp_lac, warp_gain;
 } vnoise_domain_t;
 
 #define VNOISE_MODE_FBM   0
@@ -642,6 +650,201 @@ VNOISE_API void vnoise_erode_matrix(float* m, int w, int h, const vnoise_erosion
  * Catmull-Rom clamped to the 2 x 2 neighborhood (no overshoot). */
 VNOISE_API void vnoise_resample(const float* src, int sw, int sh, float* dst, int dw, int dh,
                                 int mode);
+
+/* ------------------------------------------------------------------------
+ * Landform operations on a matrix (same conventions as above): coordinate
+ * warping, droplet and thermal erosion, exact distance fields, slope and
+ * curvature, flow routing and whole river networks. Heights are converted
+ * to cells with `relief`: a value of 1 stands `relief * max(w, h)` cells
+ * high, so slopes and talus angles are the same at every matrix resolution.
+ * ------------------------------------------------------------------------ */
+
+#define VNOISE_SAMPLE_BILINEAR 0
+#define VNOISE_SAMPLE_BICUBIC  1
+
+/* Warp of a matrix: dst(i, j) = src sampled (edge clamped, `filter`) at the
+ * cell center displaced by amp * (ux, uy) cells.
+ *   vnoise_warp_matrix with dx and dy: u = 2 * (d - 0.5) per axis, so 0.5 is
+ *     no displacement;
+ *   with dx only (dy NULL): dx is a direction (0..1 = one turn clockwise
+ *     from +x on a y-down screen), u its unit vector times strength (optional
+ *     matrix, 1 when NULL);
+ *   neither: nothing is displaced (dst = src).
+ *   vnoise_warp_matrix_noise: (ux, uy) are two fBm samples (base, octaves,
+ *     lac, gain) of the warp field of state s at the cell * freq, iterated
+ *     `levels` times as in vnoise_domain_t.
+ * dst may not alias src. */
+typedef struct {
+    float amp;
+    int filter;
+    float freq;
+    int octaves;
+    float lac, gain;
+    int base;
+    int levels;
+} vnoise_warp_t;
+
+VNOISE_API void vnoise_warp_matrix(const float* src, int w, int h, float* dst,
+                                   const float* dx, const float* dy, const float* strength,
+                                   const vnoise_warp_t* wp);
+/* Noise-driven warp with an explicit state (seeded warp fields). */
+VNOISE_API void vnoise_warp_matrix_noise(const float* src, int w, int h, float* dst,
+                                         const noise_state_t* s, const vnoise_warp_t* wp);
+
+/* Hydraulic (droplet) erosion: `droplets` seeded droplets, each started on
+ * a random cell (rain, if given, accepts it with its value), follow the
+ * slope with `inertia`, carry sediment up to capacity = max(-dh, min_slope)
+ * * speed * water * capacity, erode (erode rate, spread over a disc of
+ * `radius` cells, scaled by 1 - hardness) or deposit (deposit rate), lose
+ * `evaporation` of their water each step and live `lifetime` steps; they stop
+ * when they enter cells below sea_level (dropping their sediment there) or
+ * leave the matrix. change_out (optional) receives 0.5 + 0.5 * dz / max|dz|
+ * (above 0.5 deposition, below erosion). */
+typedef struct {
+    int droplets;
+    int lifetime;
+    float inertia;
+    float capacity, min_slope;
+    float erode, deposit;
+    float evaporation, gravity;
+    int radius;
+    float relief;
+    float sea_level;
+    unsigned long long seed;
+} vnoise_hydraulic_t;
+
+VNOISE_API void vnoise_erode_hydraulic(float* m, int w, int h, const vnoise_hydraulic_t* hp,
+                                       const float* hardness, const float* rain,
+                                       float* change_out);
+
+/* Thermal erosion (talus): `iterations` synchronous passes; where the slope
+ * to an 8-neighbor exceeds tan(talus degrees) (heights scaled by relief),
+ * `rate` of the steepest excess moves downhill, shared by the steep neighbors
+ * in proportion to their excess, scaled by 1 - hardness of the source cell.
+ * Material is conserved up to the final clamp. */
+typedef struct {
+    int iterations;
+    float talus;
+    float rate;
+    float relief;
+} vnoise_thermal_t;
+
+VNOISE_API void vnoise_erode_thermal(float* m, int w, int h, const vnoise_thermal_t* tp,
+                                     const float* hardness);
+
+#define VNOISE_DIST_OUTSIDE 0  /* cells below threshold: distance to the nearest cell >= threshold */
+#define VNOISE_DIST_INSIDE  1  /* cells >= threshold: distance to the nearest cell below it */
+#define VNOISE_DIST_SIGNED  2  /* 0.5 on the boundary, rising inside, falling outside */
+
+#define VNOISE_EDGE_NONE  0  /* the matrix edge is not a boundary */
+#define VNOISE_EDGE_BELOW 1  /* outside the matrix counts as below the threshold */
+#define VNOISE_EDGE_ABOVE 2  /* outside the matrix counts as at or above it */
+
+/* Exact Euclidean distance field (Felzenszwalb-Huttenlocher, separable, in
+ * O(w h)) from the set m >= threshold, in cells between centers. With range
+ * > 0 the output is min(d, range) / range (signed: 0.5 +- 0.5 * that, with
+ * the boundary half a cell from the cells on each side); with range <= 0 it
+ * is divided by the largest distance found. Cells with no target at all
+ * (empty set) read 1 (outside/inside) or 0 / 1 (signed). */
+typedef struct {
+    float threshold;
+    int mode;
+    float range;
+    int edge;
+} vnoise_distance_t;
+
+VNOISE_API void vnoise_distance_field(const float* m, int w, int h, float* out,
+                                      const vnoise_distance_t* dp);
+
+#define VNOISE_SLOPE_ANGLE     0  /* atan(|grad| * relief * max(w, h)) / 90 degrees */
+#define VNOISE_SLOPE_GRADIENT  1  /* min(|grad| * relief * max(w, h) / range, 1) */
+#define VNOISE_SLOPE_ASPECT    2  /* downhill direction, 0..1 one turn clockwise from +x; flat 0 */
+#define VNOISE_SLOPE_DX        3  /* 0.5 + 0.5 * clamp(dz/dx / range): east-facing above 0.5 */
+#define VNOISE_SLOPE_DY        4  /* 0.5 + 0.5 * clamp(dz/dy / range) */
+#define VNOISE_SLOPE_CURVATURE 5  /* 0.5 + 0.5 * clamp(laplacian * relief * max(w, h) / range):
+                                   * above 0.5 concave (valleys), below convex (ridges) */
+
+/* Slope analysis with Horn's 3 x 3 gradient (clamped edges). range is the
+ * value mapped to 1 (default 1 when <= 0). */
+typedef struct {
+    int mode;
+    float relief;
+    float range;
+} vnoise_slope_t;
+
+VNOISE_API void vnoise_slope(const float* m, int w, int h, float* out, const vnoise_slope_t* sp);
+
+#define VNOISE_FLOW_D8  0  /* steepest descent: water follows one neighbor */
+#define VNOISE_FLOW_MFD 1  /* multiple flow directions (Freeman): shared by slope^exponent */
+
+#define VNOISE_FLOW_LOG    0  /* log(1 + A) / log(1 + A_max) */
+#define VNOISE_FLOW_LINEAR 1  /* A / A_max */
+#define VNOISE_FLOW_RANGE  2  /* min(A / range, 1) */
+
+/* Flow routing over the depression-filled matrix (priority-flood; outlets
+ * as in the terrain plan). A is the accumulated rain (each cell adds its
+ * rain value, 1 without a rain matrix) of the cell and every cell upstream. */
+typedef struct {
+    int method;
+    float exponent;
+    int scale;
+    float range;
+    float sea_level;
+    int outlets;
+    float lake_depth;
+} vnoise_flow_t;
+
+/* Outputs of vnoise_flow; NULL ones are skipped. filled: the depression-
+ * filled heights; lake: 1 where filled - height > lake_depth. */
+typedef struct {
+    float* flow;
+    float* filled;
+    float* lake;
+} vnoise_flow_out_t;
+
+VNOISE_API void vnoise_flow(const float* m, int w, int h, const vnoise_flow_t* fp,
+                            const float* rain, const vnoise_flow_out_t* out);
+
+/* A whole river network: D8 drainage of the depression-filled heights, a
+ * channel wherever the accumulated rain reaches min_flow, traced from every
+ * head to the sea, the edge or a larger river (main stems first, so a
+ * tributary joins at the stem's carved bed). Width and depth grow with the
+ * flow: width = width0 + width_k * sqrt(A / min_flow - 1) up to max_width,
+ * depth likewise. The bed never rises downstream; lake cells (filled more
+ * than lake_depth) are crossed at the lake surface and marked 0.5 in the
+ * mask, and with fill_lakes the height there is raised to the surface. */
+typedef struct {
+    float min_flow;
+    float sea_level;
+    int outlets;
+    float width0, width_k, max_width;
+    float depth0, depth_k, max_depth;
+    float valley, valley_shape, bank;
+    float lake_depth;
+    int fill_lakes;
+    int smooth;
+    int min_length;
+} vnoise_network_t;
+
+/* Outputs of vnoise_river_network. mask (optional) receives max(mask, 1 in
+ * the channel fading over bank, 0.5 in lakes); flow (optional) the
+ * log-normalized accumulation. The polylines (downstream order, smoothed)
+ * are written into start/count (per river, up to max_rivers) and xy/width
+ * (per vertex, up to max_points); rivers that do not fit are carved but not
+ * listed. */
+typedef struct {
+    float* mask;
+    float* flow;
+    int max_rivers, max_points;
+    int* start;
+    int* count;
+    float* xy;
+    float* width;
+} vnoise_network_out_t;
+
+/* Returns the number of rivers carved. */
+VNOISE_API int vnoise_river_network(float* height, int w, int h, const vnoise_network_t* np,
+                                    const float* rain, const vnoise_network_out_t* out);
 
 #ifdef __cplusplus
 }
