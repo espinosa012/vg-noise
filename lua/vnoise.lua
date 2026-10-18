@@ -145,6 +145,8 @@ typedef struct {
     float warp_amp, warp_freq;
     int warp_octaves;
     int warp_base;
+    int warp_levels;
+    float warp_lac, warp_gain;
 } vnoise_domain_t;
 
 typedef struct vnoise_image_t vnoise_image_t;
@@ -815,7 +817,8 @@ end
 -- sample cell, `c' = pivot + M (c - translate - pivot)`. `warp = { amp, freq,
 -- octaves, base }` (or named fields) adds fBm domain warping of `amp` cells
 -- with a warp field of `freq` noise units per cell (defaults 0.05, 3 octaves,
--- simplex). `affine = { a, b, c, d, e, f }` gives the cell map directly
+-- simplex); `levels` (1..4, default 1) iterates it (`f(p + a r)`,
+-- `r = g(p + a q)`, `q = g(p)`) and `lac`/`gain` (2, 0.5) shape its octaves. `affine = { a, b, c, d, e, f }` gives the cell map directly
 -- (`c' = a c + b r + c0`, `r' = d c + e r + f`) instead of the transform
 -- fields, e.g. to compose it with a caller's own pixel-to-cell map (see
 -- `domain_affine`). The sample origin and frequency (`ox`, `oy`, `freq`) are
@@ -851,6 +854,13 @@ function vnoise.compile_domain(spec)
     d.warp_freq = warp.freq or warp[2] or 0.05
     d.warp_octaves = warp.octaves or warp[3] or 3
     d.warp_base = warp.base or warp[4] or vnoise.BASE_SIMPLEX2
+    local levels = warp.levels or 1
+    if type(levels) ~= "number" or levels < 1 or levels > 4 or levels % 1 ~= 0 then
+      error("vnoise: domain warp 'levels' must be an integer in 1..4", 2)
+    end
+    d.warp_levels = levels
+    d.warp_lac = warp.lac or 2
+    d.warp_gain = warp.gain or 0.5
   end
   return setmetatable({ d = d }, Domain)
 end
@@ -2224,6 +2234,372 @@ function vnoise.resample(src, sw, sh, dw, dh, mode)
   local dst = ffi.new("float[?]", dw * dh)
   lib.vnoise_resample(src, sw, sh, dst, dw, dh, choice(RESAMPLE_MODES, mode, "bilinear", "resample mode"))
   return dst
+end
+
+-- Landform operations ----------------------------------------------------------
+
+ffi.cdef([[
+typedef struct {
+    float amp;
+    int filter;
+    float freq;
+    int octaves;
+    float lac, gain;
+    int base;
+    int levels;
+} vnoise_warp_t;
+void vnoise_warp_matrix(const float* src, int w, int h, float* dst, const float* dx, const float* dy,
+                        const float* strength, const vnoise_warp_t* wp);
+void vnoise_warp_matrix_noise(const float* src, int w, int h, float* dst, const noise_state_t* s,
+                              const vnoise_warp_t* wp);
+
+typedef struct {
+    int droplets;
+    int lifetime;
+    float inertia;
+    float capacity, min_slope;
+    float erode, deposit;
+    float evaporation, gravity;
+    int radius;
+    float relief;
+    float sea_level;
+    unsigned long long seed;
+} vnoise_hydraulic_t;
+void vnoise_erode_hydraulic(float* m, int w, int h, const vnoise_hydraulic_t* hp, const float* hardness,
+                            const float* rain, float* change_out);
+
+typedef struct {
+    int iterations;
+    float talus;
+    float rate;
+    float relief;
+} vnoise_thermal_t;
+void vnoise_erode_thermal(float* m, int w, int h, const vnoise_thermal_t* tp, const float* hardness);
+
+typedef struct {
+    float threshold;
+    int mode;
+    float range;
+    int edge;
+} vnoise_distance_t;
+void vnoise_distance_field(const float* m, int w, int h, float* out, const vnoise_distance_t* dp);
+
+typedef struct {
+    int mode;
+    float relief;
+    float range;
+} vnoise_slope_t;
+void vnoise_slope(const float* m, int w, int h, float* out, const vnoise_slope_t* sp);
+
+typedef struct {
+    int method;
+    float exponent;
+    int scale;
+    float range;
+    float sea_level;
+    int outlets;
+    float lake_depth;
+} vnoise_flow_t;
+typedef struct {
+    float* flow;
+    float* filled;
+    float* lake;
+} vnoise_flow_out_t;
+void vnoise_flow(const float* m, int w, int h, const vnoise_flow_t* fp, const float* rain,
+                 const vnoise_flow_out_t* out);
+
+typedef struct {
+    float min_flow;
+    float sea_level;
+    int outlets;
+    float width0, width_k, max_width;
+    float depth0, depth_k, max_depth;
+    float valley, valley_shape, bank;
+    float lake_depth;
+    int fill_lakes;
+    int smooth;
+    int min_length;
+} vnoise_network_t;
+typedef struct {
+    float* mask;
+    float* flow;
+    int max_rivers, max_points;
+    int* start;
+    int* count;
+    float* xy;
+    float* width;
+} vnoise_network_out_t;
+int vnoise_river_network(float* height, int w, int h, const vnoise_network_t* np, const float* rain,
+                         const vnoise_network_out_t* out);
+]])
+
+local SAMPLE_FILTERS = { bilinear = 0, bicubic = 1 }
+local DIST_MODES = { outside = 0, inside = 1, signed = 2 }
+local DIST_EDGES = { none = 0, below = 1, above = 2 }
+local SLOPE_MODES = { angle = 0, gradient = 1, aspect = 2, dx = 3, dy = 4, curvature = 5 }
+local FLOW_METHODS = { d8 = 0, mfd = 1 }
+local FLOW_SCALES = { log = 0, linear = 1, range = 2 }
+
+-- Reads an optional positive integer.
+local function int(t, key, default, lo, hi)
+  local v = t[key]
+  if v == nil then
+    return default
+  end
+  if type(v) ~= "number" or v % 1 ~= 0 or v < lo or (hi and v > hi) then
+    error(("vnoise: '%s' must be an integer in %d..%s, got %s"):format(key, lo, hi or "inf", tostring(v)), 3)
+  end
+  return v
+end
+
+-- Resolves a state for a seeded operation: spec.state, else a state of spec.seed.
+local function stateOf(spec)
+  if spec.state then
+    return spec.state.s
+  end
+  return vnoise.new(spec.seed or 0).s
+end
+
+--- Warps a matrix: every cell reads the source at its own position displaced
+-- by `amp` cells times a displacement. The displacement comes from two
+-- matrices `dx`, `dy` (0.5 = none, 0 and 1 = -amp and +amp), from a
+-- `direction` matrix (0..1 = one turn clockwise from +x on a y-down screen)
+-- with an optional `strength` matrix (0..1), or, with none of them, from a
+-- seeded fBm warp field (`freq`, `octaves`, `lac`, `gain`, `base`) iterated
+-- `levels` times (1..4: `f(p + a r)`, `r = g(p + a q)`, `q = g(p)`), as the
+-- domain warp of `compile_domain`.
+-- @param m cdata The source matrix (not modified).
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param spec table amp (cells, 1/16 of the shorter side), filter ("bilinear", "bicubic"),
+--   dx, dy, direction, strength (matrices), freq (1/64), octaves (3), lac (2), gain (0.5),
+--   base (simplex), levels (1), state or seed (noise warp), out (optional destination).
+-- @return cdata The warped matrix (a new one unless `out`).
+function vnoise.warp(m, w, h, spec)
+  spec = spec or {}
+  local out = spec.out or vnoise.matrix(w, h)
+  if out == m then
+    error("vnoise: warp 'out' cannot be the source matrix", 2)
+  end
+  local wp = ffi.new("vnoise_warp_t")
+  wp.amp = num(spec, "amp", math.min(w, h) / 16)
+  wp.filter = choice(SAMPLE_FILTERS, spec.filter, "bilinear", "warp filter")
+  wp.freq = num(spec, "freq", 1 / 64)
+  wp.octaves = int(spec, "octaves", 3, 1, 32)
+  wp.lac = num(spec, "lac", 2)
+  wp.gain = num(spec, "gain", 0.5)
+  wp.base = spec.base or vnoise.BASE_SIMPLEX2
+  wp.levels = int(spec, "levels", 1, 1, 4)
+  if spec.dx or spec.dy then
+    if not (spec.dx and spec.dy) then
+      error("vnoise: warp needs both 'dx' and 'dy' (or 'direction')", 2)
+    end
+    lib.vnoise_warp_matrix(m, w, h, out, spec.dx, spec.dy, nil, wp)
+  elseif spec.direction then
+    lib.vnoise_warp_matrix(m, w, h, out, spec.direction, nil, spec.strength, wp)
+  else
+    lib.vnoise_warp_matrix_noise(m, w, h, out, stateOf(spec), wp)
+  end
+  return out
+end
+
+--- Hydraulic erosion by seeded droplets, in place: each droplet follows the
+-- slope with some inertia, picks up sediment where it speeds up and drops it
+-- where it slows down or climbs, carving gullies and valleys and filling
+-- basins. Heights are worked in cells: a value of 1 stands
+-- `relief * max(w, h)` cells high.
+-- @param m cdata The matrix (modified).
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param spec table|nil droplets (density * w * h), density (droplets per cell, 0.3),
+--   lifetime (30), inertia (0.05), capacity (4), min_slope (0.01), erode (0.3), deposit (0.3),
+--   evaporation (0.01), gravity (4), radius (cells, 1..8, 3), relief (0.05), sea_level (0:
+--   droplets stop and drop their load below it), seed (0), hardness, rain (matrices),
+--   change (true to return the change map).
+-- @return cdata|nil The change map (0.5 unchanged, above deposition, below erosion) when `spec.change`.
+function vnoise.erode_hydraulic(m, w, h, spec)
+  spec = spec or {}
+  local hp = ffi.new("vnoise_hydraulic_t")
+  hp.droplets = spec.droplets or math.floor(num(spec, "density", 0.3) * w * h)
+  hp.lifetime = int(spec, "lifetime", 30, 1, 1024)
+  hp.inertia = num(spec, "inertia", 0.05)
+  hp.capacity = num(spec, "capacity", 4)
+  hp.min_slope = num(spec, "min_slope", 0.01)
+  hp.erode = num(spec, "erode", 0.3)
+  hp.deposit = num(spec, "deposit", 0.3)
+  hp.evaporation = num(spec, "evaporation", 0.01)
+  hp.gravity = num(spec, "gravity", 4)
+  hp.radius = int(spec, "radius", 3, 1, 8)
+  hp.relief = num(spec, "relief", 0.05)
+  hp.sea_level = num(spec, "sea_level", 0)
+  hp.seed = spec.seed or 0
+  local change = spec.change and vnoise.matrix(w, h) or nil
+  lib.vnoise_erode_hydraulic(m, w, h, hp, spec.hardness, spec.rain, change)
+  return change
+end
+
+--- Thermal (talus) erosion, in place: material slides off slopes steeper
+-- than `talus` degrees and piles at their foot, rounding cliffs into screes.
+-- @param m cdata The matrix (modified).
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param spec table|nil iterations (50), talus (degrees, 35), rate (0..1, 0.5), relief (0.05),
+--   hardness (matrix).
+function vnoise.erode_thermal(m, w, h, spec)
+  spec = spec or {}
+  local tp = ffi.new("vnoise_thermal_t")
+  tp.iterations = int(spec, "iterations", 50, 0, 100000)
+  tp.talus = num(spec, "talus", 35)
+  tp.rate = num(spec, "rate", 0.5)
+  tp.relief = num(spec, "relief", 0.05)
+  lib.vnoise_erode_thermal(m, w, h, tp, spec.hardness)
+end
+
+--- Exact Euclidean distance field of the set `m >= threshold` (cells between
+-- centers, unbounded): "outside" (distance from the cells below the
+-- threshold to the set), "inside" (from the set to the cells below) or
+-- "signed" (0.5 on the boundary, above inside, below outside). Values are
+-- `min(d, range) / range`, or divided by the largest distance when `range`
+-- is 0. Distance to the coast is `distance_field(elevation, w, h,
+-- { threshold = sea_level, mode = "signed", range = 64 })`.
+-- @param m cdata The matrix.
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param spec table|nil threshold (0.5), mode ("outside"), range (cells, 0), edge ("none";
+--   "below" or "above": the outside of the matrix belongs to that side), out.
+-- @return cdata The distance matrix.
+function vnoise.distance_field(m, w, h, spec)
+  spec = spec or {}
+  local dp = ffi.new("vnoise_distance_t")
+  dp.threshold = num(spec, "threshold", 0.5)
+  dp.mode = choice(DIST_MODES, spec.mode, "outside", "distance mode")
+  dp.range = num(spec, "range", 0)
+  dp.edge = choice(DIST_EDGES, spec.edge, "none", "distance edge")
+  local out = spec.out or vnoise.matrix(w, h)
+  lib.vnoise_distance_field(m, w, h, out, dp)
+  return out
+end
+
+--- Slope analysis (Horn's 3 x 3 gradient, clamped edges) with heights in
+-- cells (`relief`): "angle" (0 flat .. 1 vertical), "gradient"
+-- (`min(rise / run / range, 1)`), "aspect" (downhill direction, 0..1 one
+-- turn clockwise from +x; flat cells 0), "dx" / "dy" (0.5 + signed slope /
+-- range / 2) and "curvature" (0.5 + Laplacian / range / 2: above 0.5
+-- concave, valleys; below convex, ridges).
+-- @param m cdata The matrix.
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param spec table|nil mode ("angle"), relief (0.05), range (1), out.
+-- @return cdata The slope matrix.
+function vnoise.slope(m, w, h, spec)
+  spec = spec or {}
+  local sp = ffi.new("vnoise_slope_t")
+  sp.mode = choice(SLOPE_MODES, spec.mode, "angle", "slope mode")
+  sp.relief = num(spec, "relief", 0.05)
+  sp.range = num(spec, "range", 1)
+  local out = spec.out or vnoise.matrix(w, h)
+  if out == m then
+    error("vnoise: slope 'out' cannot be the source matrix", 2)
+  end
+  lib.vnoise_slope(m, w, h, out, sp)
+  return out
+end
+
+--- Flow accumulation over the depression-filled matrix (priority-flood,
+-- outlets at the sea and/or the edges): every cell adds its rain (1 without
+-- a `rain` matrix) to the cells downstream, along the steepest descent
+-- ("d8") or shared among the lower neighbors ("mfd", slope^exponent).
+-- @param m cdata The height matrix.
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param spec table|nil method ("d8"), exponent (mfd, 1.1), scale ("log", "linear", "range"),
+--   range (cells of rain, scale "range"), sea_level (0), outlets ("both"), lake_depth (0.002),
+--   rain (matrix), filled and lake (true to return them too).
+-- @return cdata The flow matrix (0..1).
+-- @return cdata|nil The depression-filled heights when `spec.filled`.
+-- @return cdata|nil The lake mask (1 where filled more than lake_depth) when `spec.lake`.
+function vnoise.flow(m, w, h, spec)
+  spec = spec or {}
+  local fp = ffi.new("vnoise_flow_t")
+  fp.method = choice(FLOW_METHODS, spec.method, "d8", "flow method")
+  fp.exponent = num(spec, "exponent", 1.1)
+  fp.scale = choice(FLOW_SCALES, spec.scale, "log", "flow scale")
+  fp.range = num(spec, "range", 1)
+  fp.sea_level = num(spec, "sea_level", 0)
+  fp.outlets = choice(MATRIX_OUTLETS, spec.outlets, "both", "outlets")
+  fp.lake_depth = num(spec, "lake_depth", 0.002)
+  local out = ffi.new("vnoise_flow_out_t")
+  local flow = vnoise.matrix(w, h)
+  local filled = spec.filled and vnoise.matrix(w, h) or nil
+  local lake = spec.lake and vnoise.matrix(w, h) or nil
+  out.flow, out.filled, out.lake = flow, filled, lake
+  lib.vnoise_flow(m, w, h, fp, spec.rain, out)
+  return flow, filled, lake
+end
+
+--- Carves a whole river network into a height matrix: the D8 drainage of
+-- the depression-filled heights becomes a channel wherever the accumulated
+-- rain reaches `min_flow` cells, traced from every head to the sea, the edge
+-- or a larger river (main stems first; tributaries join at the stem's bed).
+-- Width and depth grow with the square root of the flow; the bed never
+-- rises downstream; lakes the rivers cross are marked 0.5 in the mask (and
+-- filled to their surface with `fill_lakes`).
+-- @param height cdata The height matrix (modified).
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param spec table|nil min_flow (cells of rain, max(16, w * h / 2000)), sea_level (0),
+--   outlets ("both"), width0 (1), width_k (0.5), max_width (8), depth0 (0.004), depth_k (0.002),
+--   max_depth (0.03), valley (4), valley_shape (1), bank (1), lake_depth (0.002), fill_lakes
+--   (false), smooth (Chaikin passes, 2), min_length (cells, 4), rain (matrix), flow (true to
+--   return the log-normalized flow), max_rivers (4096), max_points (262144).
+-- @param mask cdata|nil The river mask (allocated when nil; values only grow).
+-- @return table Rivers, main stems first: `{ points = { x1, y1, ... }, width = { ... } }` (cells).
+-- @return cdata The mask.
+-- @return cdata|nil The flow matrix when `spec.flow`.
+function vnoise.river_network(height, w, h, spec, mask)
+  spec = spec or {}
+  mask = mask or vnoise.matrix(w, h)
+  local np = ffi.new("vnoise_network_t")
+  np.min_flow = num(spec, "min_flow", math.max(16, w * h / 2000))
+  np.sea_level = num(spec, "sea_level", 0)
+  np.outlets = choice(MATRIX_OUTLETS, spec.outlets, "both", "outlets")
+  np.width0 = num(spec, "width0", 1)
+  np.width_k = num(spec, "width_k", 0.5)
+  np.max_width = num(spec, "max_width", 8)
+  np.depth0 = num(spec, "depth0", 0.004)
+  np.depth_k = num(spec, "depth_k", 0.002)
+  np.max_depth = num(spec, "max_depth", 0.03)
+  np.valley = num(spec, "valley", 4)
+  np.valley_shape = num(spec, "valley_shape", 1)
+  np.bank = num(spec, "bank", 1)
+  np.lake_depth = num(spec, "lake_depth", 0.002)
+  np.fill_lakes = spec.fill_lakes and 1 or 0
+  np.smooth = int(spec, "smooth", 2, 0, 4)
+  np.min_length = int(spec, "min_length", 4, 1)
+  local max_rivers = int(spec, "max_rivers", 4096, 0)
+  local max_points = int(spec, "max_points", 262144, 0)
+  local out = ffi.new("vnoise_network_out_t")
+  local start = ffi.new("int[?]", math.max(max_rivers, 1))
+  local count = ffi.new("int[?]", math.max(max_rivers, 1))
+  local xy = ffi.new("float[?]", 2 * math.max(max_points, 1))
+  local width = ffi.new("float[?]", math.max(max_points, 1))
+  local flow = spec.flow and vnoise.matrix(w, h) or nil
+  out.mask, out.flow = mask, flow
+  out.max_rivers, out.max_points = max_rivers, max_points
+  out.start, out.count, out.xy, out.width = start, count, xy, width
+  local n = lib.vnoise_river_network(height, w, h, np, spec.rain, out)
+  local rivers = {}
+  for r = 0, math.min(n, max_rivers) - 1 do
+    local points, widths = {}, {}
+    local s0 = start[r]
+    for k = 0, count[r] - 1 do
+      points[2 * k + 1] = xy[2 * (s0 + k)]
+      points[2 * k + 2] = xy[2 * (s0 + k) + 1]
+      widths[k + 1] = width[s0 + k]
+    end
+    rivers[r + 1] = { points = points, width = widths }
+  end
+  return rivers, mask, flow
 end
 
 -- Global statistics as point ops ----------------------------------------------

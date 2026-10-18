@@ -340,6 +340,49 @@ Cost at 1024² (Apple M-series): a cone stamp about 6 ms, a 4-point ridge
 about 32 ms, a river about 1–2 ms, erosion with 60 iterations about 0.5 s
 (eroded at 512²).
 
+### Landform operations
+
+Matrix operations that shape and analyze a whole map, with the same
+conventions (row-major `float[w * h]`, values in 0..1, deterministic). Those
+that need slopes measure heights in cells through `relief`: a value of 1
+stands `relief * max(w, h)` cells high (default 0.05), so a slope keeps its
+angle when the same map is computed at another resolution.
+
+```lua
+local W, H = 1024, 1024
+local m = vnoise.fill_source(state, vnoise.presets.continent({ width = W, height = H }), { w = W, h = H })
+m = vnoise.warp(m, W, H, { amp = 40, freq = 1 / 120, levels = 2, seed = 5 })  -- organic coasts
+vnoise.erode_hydraulic(m, W, H, { sea_level = 0.4, seed = 3 })                 -- gullies, fans, deltas
+vnoise.erode_thermal(m, W, H, { talus = 30 })                                  -- cliffs into screes
+local coast = vnoise.distance_field(m, W, H, { threshold = 0.4, mode = "signed", range = 64 })
+local slope = vnoise.slope(m, W, H, { mode = "angle" })
+local wet = vnoise.flow(m, W, H, { method = "mfd", sea_level = 0.4 })
+local rivers, mask = vnoise.river_network(m, W, H, { sea_level = 0.4 })         -- every river to the sea
+```
+
+| Operation | What it does |
+|-----------|--------------|
+| `vnoise.warp(m, w, h, spec)` | new matrix sampling `m` at displaced points: by `dx`/`dy` matrices (0.5 = none, 0/1 = -/+`amp` cells), by a `direction` matrix (0..1 = one turn clockwise from +x) with optional `strength`, or by a seeded fBm field (`freq`, `octaves`, `lac`, `gain`, `base`) iterated `levels` (1..4) times; `filter` bilinear or bicubic (no overshoot) |
+| `vnoise.erode_hydraulic(m, w, h, spec)` | droplet erosion: `density` droplets per cell (0.3) with `lifetime`, `inertia`, `capacity`, `min_slope`, `erode`, `deposit`, `evaporation`, `gravity`, brush `radius`; they stop at `sea_level` and drop their load (deltas); optional `hardness` and `rain` matrices; `change = true` returns 0.5 + signed change |
+| `vnoise.erode_thermal(m, w, h, spec)` | talus erosion: slopes above `talus` degrees shed `rate` of their excess to their foot, for `iterations` synchronous passes; optional `hardness` |
+| `vnoise.distance_field(m, w, h, spec)` | exact Euclidean distance (Felzenszwalb-Huttenlocher, unbounded) to the set `m >= threshold`: `outside`, `inside` or `signed` (0.5 on the boundary), `min(d, range) / range` or normalized by the largest; `edge` `below`/`above` counts the outside of the matrix as sea or land |
+| `vnoise.slope(m, w, h, spec)` | Horn gradient as `angle` (0 flat .. 1 vertical), `gradient`, `aspect` (downhill direction), `dx`, `dy` or `curvature` (above 0.5 concave) |
+| `vnoise.flow(m, w, h, spec)` | accumulated `rain` (default 1 per cell) over the depression-filled heights, `d8` or `mfd` (slope^`exponent`), scaled `log`, `linear` or by `range`; optionally the filled heights and the lake mask |
+| `vnoise.river_network(height, w, h, spec, mask)` | every river whose flow reaches `min_flow` cells of rain, main stems first, tributaries joined at the stem's bed, width/depth growing with `sqrt(flow)`, lakes crossed at their surface (`fill_lakes`), carved in one pass; returns `{ points, width }` per river, the mask and (with `flow = true`) the flow |
+
+The domain warp of sampler fills gains the same iterated levels and
+configurable lacunarity and gain: `domain = { warp = { amp, freq, octaves,
+levels = 2, lac = 2, gain = 0.5 } }` (one level is the original warp, bit for
+bit). C: `vnoise_warp_matrix`, `vnoise_warp_matrix_noise`,
+`vnoise_erode_hydraulic`, `vnoise_erode_thermal`, `vnoise_distance_field`,
+`vnoise_slope`, `vnoise_flow`, `vnoise_river_network` and their parameter
+structs in `vnoise.h`. Tests: `tests/landforms.lua`.
+
+Cost at 1024² (Apple M-series): warp with two levels about 150 ms, hydraulic
+erosion about 0.3 s, thermal erosion (50 passes) about 0.5 s, signed distance
+about 27 ms, slope 5 ms, flow 0.1 s (D8) / 0.2 s (MFD), river network about
+0.12 s.
+
 ### Determinism
 
 - Same seed produces the **same output within the same build**
@@ -619,6 +662,9 @@ cpp/
   src/matrix_features.cpp     Stamps and path features on matrices
   src/matrix_rivers.cpp       Rivers and random sources on matrices
   src/matrix_filters.cpp      Matrix erosion and resampling
+  src/matrix_analysis.cpp     Matrix warp, distance fields, slope
+  src/matrix_erosion.cpp      Hydraulic (droplet) and thermal erosion
+  src/matrix_network.cpp      Flow accumulation and river networks
 lua/vnoise.lua                LuaJIT FFI binding + ergonomic wrappers
 examples/love2d/conf.lua      Love2D config (1024x768 window)
 examples/love2d/main.lua      Demo: texture + isometric mesh
@@ -631,6 +677,7 @@ tests/value_ops.lua          Value-op chains (make test)
 tests/image_ops.lua          Domain, kernels, masks, pipelines (make test)
 tests/terrain.lua            Samplers, sources, gullies, terrain plans (make test)
 tests/matrix_ops.lua         Stamps, path features, rivers, matrix filters (make test)
+tests/landforms.lua          Warp, erosion, distance, slope, flow, river networks (make test)
 tests/abi.lua                Register-only signatures, octave bound, JIT vs interpreter (make test)
 Makefile                     Cross-platform build, no CMake
 README.md                    This file
