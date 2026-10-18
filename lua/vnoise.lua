@@ -147,6 +147,8 @@ typedef struct {
     int warp_base;
 } vnoise_domain_t;
 
+typedef struct vnoise_image_t vnoise_image_t;
+
 typedef struct {
     int mode;
     int base;
@@ -155,6 +157,8 @@ typedef struct {
     float jitter;
     float damping;
     float p[4];
+    const vnoise_image_t* image;
+    int wrap, filter;
 } vnoise_sampler_t;
 
 void vnoise_fill_domain(const noise_state_t* s, const vnoise_sampler_t* sp,
@@ -189,6 +193,13 @@ float cellular2_eval(const noise_state_t* s, float x, float y, float jitter, int
 
 void vnoise_fill_sampler(const noise_state_t* s, const vnoise_sampler_t* sp,
                          float* out, int c0, int r0, int w, int h, const vnoise_domain_t* d);
+vnoise_image_t* vnoise_image_load(const char* path);
+vnoise_image_t* vnoise_image_from_pixels(const void* data, int w, int h, int channels, int bytes);
+void vnoise_image_free(vnoise_image_t* img);
+int vnoise_image_width(const vnoise_image_t* img);
+int vnoise_image_height(const vnoise_image_t* img);
+const float* vnoise_image_data(const vnoise_image_t* img);
+const char* vnoise_image_error(void);
 void vnoise_combine(float* dst, const float* src, int count, int op, float w);
 void vnoise_combine_lerp(float* dst, const float* b, const float* t, int count);
 void vnoise_gullies(const float* src, int sw, int sh, float* dst, int c0, int r0,
@@ -275,6 +286,14 @@ local vnoise = {
   MODE_CELL_EDGE = 5,
   MODE_CELL_VALUE = 6,
   MODE_DAMPED = 7,
+  MODE_IMAGE = 8,
+  -- Image wrap modes and filters (vnoise_sampler_t).
+  WRAP_CLAMP = 0,
+  WRAP_REPEAT = 1,
+  WRAP_MIRROR = 2,
+  FILTER_NEAREST = 0,
+  FILTER_BILINEAR = 1,
+  FILTER_BICUBIC = 2,
   -- cellular2_eval results.
   CELL_F1 = 0,
   CELL_F2 = 1,
@@ -467,7 +486,93 @@ local SAMPLER_KINDS = {
   cell_edge = vnoise.MODE_CELL_EDGE,
   cell_value = vnoise.MODE_CELL_VALUE,
   damped = vnoise.MODE_DAMPED,
+  image = vnoise.MODE_IMAGE,
 }
+
+-- Grayscale images ------------------------------------------------------------
+
+-- Marks an image object: { ptr = vnoise_image_t* (freed with the object), w, h }.
+local Image = {}
+Image.__index = Image
+
+local IMAGE_WRAPS = { clamp = vnoise.WRAP_CLAMP, ["repeat"] = vnoise.WRAP_REPEAT, mirror = vnoise.WRAP_MIRROR }
+local IMAGE_FILTERS =
+  { nearest = vnoise.FILTER_NEAREST, bilinear = vnoise.FILTER_BILINEAR, bicubic = vnoise.FILTER_BICUBIC }
+
+-- Keeps the image of each sampler struct alive as long as the struct is
+-- (the struct only holds a raw pointer). Weak keys: entries go with the struct.
+local IMAGE_OF = setmetatable({}, { __mode = "k" })
+
+local function wrapImage(ptr, level, what)
+  if ptr == nil then
+    error("vnoise: " .. what, level + 1)
+  end
+  ptr = ffi.gc(ptr, lib.vnoise_image_free)
+  return setmetatable({ ptr = ptr, w = lib.vnoise_image_width(ptr), h = lib.vnoise_image_height(ptr) }, Image)
+end
+
+--- Loads a grayscale image to use as a noise field (`kind = "image"`). PNG,
+-- JPEG, BMP, TGA and PGM/PNM files are read; colour files become luminance,
+-- 16-bit files keep their precision. Values are floats in 0..1, row 0 on top.
+-- @param path string The image file.
+-- @return table An image `{ w, h, ptr }` with `:pixel(i, j)`.
+function vnoise.load_image(path)
+  if type(path) ~= "string" then
+    error("vnoise: load_image needs a path string", 2)
+  end
+  local ptr = lib.vnoise_image_load(path)
+  if ptr == nil then
+    error(("vnoise: cannot load image '%s': %s"):format(path, ffi.string(lib.vnoise_image_error())), 2)
+  end
+  return wrapImage(ptr, 2, "")
+end
+
+--- Builds an image from raw pixels (copied), e.g. a LÖVE ImageData with
+-- `image_from_pixels(data:getPointer(), data:getWidth(), data:getHeight(), 4, 1)`.
+-- @param data cdata|string Row-major pixels, top row first.
+-- @param w number Width in pixels.
+-- @param h number Height in pixels.
+-- @param channels number|nil Interleaved channels, 1..4 (default 1). One or two use the first
+--   channel; three or four use the luminance of the first three.
+-- @param bytes number|nil Bytes per channel: 1 (0..255), 2 (uint16) or 4 (float 0..1). Default 1.
+-- @return table The image.
+function vnoise.image_from_pixels(data, w, h, channels, bytes)
+  local ptr = lib.vnoise_image_from_pixels(data, w, h, channels or 1, bytes or 1)
+  return wrapImage(ptr, 2, "image_from_pixels needs positive sizes, 1..4 channels, 1/2/4 bytes and pixel data")
+end
+
+--- True when `v` is an image made by `load_image` or `image_from_pixels`.
+function vnoise.is_image(v)
+  return getmetatable(v) == Image
+end
+
+--- The value (0..1) of pixel `(i, j)`, zero-based; nil outside the image.
+function Image:pixel(i, j)
+  if i < 0 or j < 0 or i >= self.w or j >= self.h then
+    return nil
+  end
+  return lib.vnoise_image_data(self.ptr)[j * self.w + i]
+end
+
+-- An image given as a path or an image object.
+local function resolveImage(v, level)
+  if type(v) == "string" then
+    return vnoise.load_image(v)
+  end
+  if getmetatable(v) ~= Image then
+    error("vnoise: kind 'image' needs an `image` (a path or an image from load_image)", level + 1)
+  end
+  return v
+end
+
+-- Reads a named choice of a table, raising an error naming an unknown value.
+local function pick(map, value, default, what, level)
+  local v = map[value == nil and default or value]
+  if v == nil then
+    error("vnoise: unknown " .. what .. " '" .. tostring(value) .. "'", level + 1)
+  end
+  return v
+end
 
 -- Builds a vnoise_sampler_t from `{ kind, base, octaves, lac, gain, jitter, damping }`.
 local function samplerStruct(spec, level)
@@ -483,6 +588,13 @@ local function samplerStruct(spec, level)
   sp.gain = spec.gain or 0.5
   sp.jitter = spec.jitter or 1
   sp.damping = spec.damping or 1
+  if mode == vnoise.MODE_IMAGE then
+    local img = resolveImage(spec.image, level + 1)
+    sp.image = img.ptr
+    sp.wrap = pick(IMAGE_WRAPS, spec.wrap, "clamp", "image wrap", level + 1)
+    sp.filter = pick(IMAGE_FILTERS, spec.filter, "bilinear", "image filter", level + 1)
+    IMAGE_OF[sp] = img
+  end
   return sp
 end
 
@@ -502,6 +614,9 @@ local function fillSampler(kind, opts, level)
     gain = opts.gain,
     jitter = opts.jitter,
     damping = opts.damping,
+    image = opts.image,
+    wrap = opts.wrap,
+    filter = opts.filter,
   }, level + 1)
 end
 
@@ -535,7 +650,7 @@ function vnoise.fill_grid(state, kind, opts)
     -- sampled at (ox + i * freq, oy + j * freq), as the classic grid fills.
     local d = ffi.new("vnoise_domain_t")
     d.m[0], d.m[4] = 1, 1
-    d.ox, d.oy, d.freq = opts.ox or 0, opts.oy or 0, opts.freq or 0.01
+    d.ox, d.oy, d.freq = opts.ox or 0, opts.oy or 0, opts.freq or (kind == "image" and 1 or 0.01)
     lib.vnoise_fill_sampler(state.s, sp, out, 0, 0, w, h, d)
   else
     fn(
@@ -765,9 +880,9 @@ function vnoise.domain_affine(spec)
 end
 
 -- Copies a compiled domain with the per-fill origin and frequency.
-local function domainFor(domain, opts)
+local function domainFor(domain, opts, kind)
   local d = ffi.new("vnoise_domain_t", domain.d)
-  d.ox, d.oy, d.freq = opts.ox or 0, opts.oy or 0, opts.freq or 0.01
+  d.ox, d.oy, d.freq = opts.ox or 0, opts.oy or 0, opts.freq or (kind == "image" and 1 or 0.01)
   return d
 end
 
@@ -789,7 +904,7 @@ function vnoise.fill_domain(state, kind, opts)
   modeOf(kind) -- raises for an unknown kind
   local w, h = opts.w or 256, opts.h or 256
   local out = opts.out or ffi.new("float[?]", w * h)
-  local d = domainFor(vnoise.compile_domain(opts.domain), opts)
+  local d = domainFor(vnoise.compile_domain(opts.domain), opts, kind)
   local sp = fillSampler(kind, opts, 2)
   if sp then
     lib.vnoise_fill_sampler(state.s, sp, out, opts.c0 or 0, opts.r0 or 0, w, h, d)
@@ -1164,7 +1279,7 @@ function vnoise.fill_pipeline(state, kind, pipeline, opts)
   if p.source then
     vnoise.fill_source(state, p.source, { c0 = c0 - rem, r0 = r0 - rem, w = sw, h = sh, out = cur })
   elseif sp then
-    lib.vnoise_fill_sampler(state.s, sp, cur, c0 - rem, r0 - rem, sw, sh, domainFor(p.domain, opts))
+    lib.vnoise_fill_sampler(state.s, sp, cur, c0 - rem, r0 - rem, sw, sh, domainFor(p.domain, opts, kind))
   else
     lib.vnoise_fill_domain(
       state.s,
@@ -1213,7 +1328,7 @@ function vnoise.fill_sampler(state, spec, opts)
   local sp = samplerStruct(spec, 2)
   local w, h = opts.w or 256, opts.h or 256
   local out = opts.out or ffi.new("float[?]", w * h)
-  local d = domainFor(vnoise.compile_domain(opts.domain), opts)
+  local d = domainFor(vnoise.compile_domain(opts.domain), opts, spec.kind)
   local c0, r0, stride = opts.c0 or 0, opts.r0 or 0, opts.stride or 1
   if stride ~= 1 then
     d, c0, r0 = stridedDomain(d, c0, r0, stride), 0, 0
@@ -1366,9 +1481,12 @@ compileNode = function(spec, path)
         gain = spec.gain,
         jitter = spec.jitter,
         damping = spec.damping,
+        image = spec.image,
+        wrap = spec.wrap,
+        filter = spec.filter,
       }, 1),
       domain = vnoise.compile_domain(spec.domain),
-      freq = spec.freq,
+      freq = spec.freq or (kind == "image" and 1 or nil),
       ox = spec.ox,
       oy = spec.oy,
       state = spec.seed and vnoise.new(spec.seed) or nil,

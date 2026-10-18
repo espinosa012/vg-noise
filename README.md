@@ -97,6 +97,37 @@ its samples are copied into the chain's pool (`chain.data`). Pass the
 compiled chain to avoid rebuilding it on every call. `make test` runs
 `tests/value_ops.lua` with LuaJIT.
 
+### Images as noise
+
+A grayscale image is a sampler kind (`"image"`), so it goes through the same
+domains, op chains, masks, pipelines and source trees as fBm or cellular noise.
+PNG, JPEG, BMP, TGA and PGM files are decoded with stb_image (vendored in
+`cpp/third_party/`); colour becomes luminance and 16-bit files keep their
+precision, which suits heightmaps. Values are floats in 0..1, row 0 on top.
+
+```lua
+local img = vnoise.load_image("height.png")        -- or image_from_pixels(ptr, w, h, 4, 1)
+local buf = vnoise.fill_sampler(state, { kind = "image", image = img }, { w = 256, h = 256 })
+
+-- as a leaf of a source tree, mixed with noise and processed like any other
+local src = vnoise.compile_source({
+  "add",
+  { "image", image = "island.png", filter = "bicubic", wrap = "mirror", freq = 0.5 },
+  { "fbm", freq = 0.02, octaves = 4 },
+  weights = { 0.8, 0.2 },
+  ops = { { "smoothstep", 0.2, 0.8 } },
+})
+```
+
+`freq` defaults to 1 for this kind, so cell `(c, r)` reads pixel `(c, r)` and
+`freq = 0.5` stretches the image to twice its size. `filter` is `nearest`,
+`bilinear` (default) or `bicubic`; `wrap` is `clamp` (default), `repeat` or
+`mirror`. C: `vnoise_image_load`, `vnoise_image_from_pixels`,
+`VNOISE_MODE_IMAGE` and the `image`, `wrap`, `filter` fields of
+`vnoise_sampler_t`. A LÖVE `ImageData` can be passed with
+`vnoise.image_from_pixels(data:getPointer(), w, h, 4, 1)`. Tests:
+`tests/image_source.lua`.
+
 ### Image processing (domain, kernels, masks, pipelines)
 
 A block of noise values can be processed as a grayscale image (0..1 by
