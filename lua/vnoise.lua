@@ -818,7 +818,8 @@ end
 -- octaves, base }` (or named fields) adds fBm domain warping of `amp` cells
 -- with a warp field of `freq` noise units per cell (defaults 0.05, 3 octaves,
 -- simplex); `levels` (1..4, default 1) iterates it (`f(p + a r)`,
--- `r = g(p + a q)`, `q = g(p)`) and `lac`/`gain` (2, 0.5) shape its octaves. `affine = { a, b, c, d, e, f }` gives the cell map directly
+-- `r = g(p + a q)`, `q = g(p)`) and `lac`/`gain` (2, 0.5) shape its octaves.
+-- `affine = { a, b, c, d, e, f }` gives the cell map directly
 -- (`c' = a c + b r + c0`, `r' = d c + e r + f`) instead of the transform
 -- fields, e.g. to compose it with a caller's own pixel-to-cell map (see
 -- `domain_affine`). The sample origin and frequency (`ox`, `oy`, `freq`) are
