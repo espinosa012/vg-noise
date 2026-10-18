@@ -1,7 +1,7 @@
 # matrix-warp Specification
 
 ## Purpose
-TBD - created by archiving change matrix-landform-ops. Update Purpose after archive.
+Define warping of an existing matrix by displacement matrices, a direction field or a seeded, iterated warp field.
 
 ## Requirements
 

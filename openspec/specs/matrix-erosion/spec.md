@@ -1,7 +1,7 @@
 # matrix-erosion Specification
 
 ## Purpose
-TBD - created by archiving change matrix-landform-ops. Update Purpose after archive.
+Define particle-based erosion on a matrix: hydraulic erosion by seeded droplets that carry and drop sediment, and thermal (talus) erosion, with heights measured in cells so parameters do not depend on the resolution.
 
 ## Requirements
 

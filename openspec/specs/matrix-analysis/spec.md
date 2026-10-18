@@ -1,7 +1,7 @@
 # matrix-analysis Specification
 
 ## Purpose
-TBD - created by archiving change matrix-landform-ops. Update Purpose after archive.
+Define whole-matrix analyses: exact Euclidean distance fields (outside, inside, signed), slope, aspect and curvature with heights in cells, and flow accumulation over the depression-filled matrix.
 
 ## Requirements
 

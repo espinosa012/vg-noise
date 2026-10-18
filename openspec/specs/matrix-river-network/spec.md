@@ -1,7 +1,7 @@
 # matrix-river-network Specification
 
 ## Purpose
-TBD - created by archiving change matrix-landform-ops. Update Purpose after archive.
+Define whole river networks carved into a matrix from its D8 drainage: channels where the accumulated rain reaches a threshold, main stems first, tributaries joined at the stem's bed, lakes crossed at their surface.
 
 ## Requirements
 
