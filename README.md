@@ -367,7 +367,7 @@ local rivers, mask = vnoise.river_network(m, W, H, { sea_level = 0.4 })         
 | `vnoise.erode_thermal(m, w, h, spec)` | talus erosion: slopes above `talus` degrees shed `rate` of their excess to their foot, for `iterations` synchronous passes; optional `hardness` |
 | `vnoise.distance_field(m, w, h, spec)` | exact Euclidean distance (Felzenszwalb-Huttenlocher, unbounded) to the set `m >= threshold`: `outside`, `inside` or `signed` (0.5 on the boundary), `min(d, range) / range` or normalized by the largest; `edge` `below`/`above` counts the outside of the matrix as sea or land |
 | `vnoise.slope(m, w, h, spec)` | Horn gradient as `angle` (0 flat .. 1 vertical), `gradient`, `aspect` (downhill direction), `dx`, `dy` or `curvature` (above 0.5 concave) |
-| `vnoise.flow(m, w, h, spec)` | accumulated `rain` (default 1 per cell) over the depression-filled heights, `d8` or `mfd` (slope^`exponent`), scaled `log`, `linear` or by `range`; optionally the filled heights and the lake mask |
+| `vnoise.flow(m, w, h, spec)` | accumulated `rain` (default 1 per cell) over the depression-filled heights, `d8` or `mfd` (slope^`exponent`), scaled `log`, `linear` or by `range`; optionally the filled heights, the lake mask and (`twi = true`) the topographic wetness index (see [Climate operations](#climate-operations)) |
 | `vnoise.river_network(height, w, h, spec, mask)` | every river whose flow reaches `min_flow` cells of rain, main stems first, tributaries joined at the stem's bed, width/depth growing with `sqrt(flow)`, lakes crossed at their surface (`fill_lakes`), carved in one pass; returns `{ points, width }` per river, the mask and (with `flow = true`) the flow |
 
 The domain warp of sampler fills gains the same iterated levels and
@@ -382,6 +382,56 @@ Cost at 1024² (Apple M-series): warp with two levels about 150 ms, hydraulic
 erosion about 0.3 s, thermal erosion (50 passes) about 0.5 s, signed distance
 about 27 ms, slope 5 ms, flow 0.1 s (D8) / 0.2 s (MFD), river network about
 0.12 s.
+
+### Climate operations
+
+Matrix operations for climate maps (precipitation, humidity, smoothed
+temperature), with the same conventions as the landform operations.
+
+```lua
+local W, H = 1024, 512
+local rain, moist, fetch = vnoise.moisture(m, W, H, {
+  sea_level = 0.4, moisture = true, fetch = true, fetch_range = 300,
+  bands = { 1 / 6, 1 / 3, 0.5, 2 / 3, 5 / 6 }, tilt = 15,            -- winds by latitude
+})
+rain = vnoise.blur_large(rain, W, H, { sigma = 6 })                   -- soften the rain bands
+local _, _, _, twi = vnoise.flow(m, W, H, { method = "mfd", sea_level = 0.4, twi = true })
+local sea = vnoise.distance_field(m, W, H, { threshold = 0.4, range = 1 })  -- 1 at sea, 0 on land
+local maritime = vnoise.blur_large(sea, W, H, { sigma = 200 })              -- any sigma, same cost
+```
+
+| Operation | What it does |
+|-----------|--------------|
+| `vnoise.moisture(m, w, h, spec)` | moisture carried by the wind with orographic precipitation: the air gains `evaporation` per cell over the sources (`source` matrix, or the cells below `sea_level`) up to `capacity`; over land it rains `base_rate` of its moisture per cell plus `orographic` times the height climbed in cells (`relief`), so windward slopes are wet and their lee is a rain shadow. The wind comes from a `direction` matrix (0..1 = one turn clockwise from +x) or from latitude `bands` by row (polar easterlies, westerlies, trade winds; `tilt` degrees toward the equator or the pole). Returns the precipitation (`/ range`, or `/` the largest), and with `moisture = true` / `fetch = true` the moisture carried and the fetch (distance along the wind since the last source, `/ fetch_range`; 1 where no source lies upwind) |
+| `vnoise.blur_large(m, w, h, spec)` | Gaussian blur of any `sigma` (up to 16384 cells, not limited by the 32-cell kernel radius of pipelines): `passes` (3) extended box filters per axis with the exact variance, O(1) per cell, clamped edges like `apply_stages`; within about 1% of the value range of the exact Gaussian |
+| `vnoise.flow(..., { twi = true })` | topographic wetness index `ln(A / tan(beta))`: A the flow accumulation (cells of rain, either method), tan(beta) the steepest descent to a neighbor on the unfilled heights (`relief`, at least `epsilon`), `/ twi_range` or stretched to 0..1 when `twi_range` is 0; high on valley floors and flats, low on crests and steep slopes |
+
+**Moisture model.** The steady state is solved upwind: each cell reads the
+moisture where the wind ray crosses the previous column (or row), between
+two cells, a step of `L = 1 / max(|ux|, |uy|)` cells; air entering from
+outside the matrix carries `inflow` (0). Without a `source` matrix the
+sources are the cells below `sea_level`, so with the default `sea_level` of
+0 only `inflow` brings moisture. Gauss-Seidel sweeps, one per wind
+quadrant with rows and columns running with the wind, settle a uniform wind
+in one cycle; `iterations` (4) cycles cover winds that turn. The latitude
+bands are five row fractions (0..1 of the height, non-decreasing): polar
+front, subtropical ridge, equator, subtropical ridge, polar front. Between
+the ridges blow the trade winds and beyond the fronts the polar easterlies
+(toward -x), in between the westerlies (toward +x); the pattern mirrors about
+the equator, so which edge is north does not matter. Precipitation per cell
+depends on the step length, so `range` and the rates are per cell of the
+matrix being computed (scale them when the same map is computed at another
+resolution). Defaults: `evaporation` 0.05, `capacity` 1, `base_rate` 0.002,
+`orographic` 1, `relief` 0.05.
+
+C: `vnoise_moisture`, `vnoise_blur_matrix` and `vnoise_flow_twi` (the
+outputs of `vnoise_flow` plus the index) with `vnoise_moisture_t`,
+`vnoise_moisture_out_t`, `vnoise_blur_t` and `vnoise_twi_t` in `vnoise.h`.
+Tests: `tests/climate.lua`.
+
+Cost at 1024² (Apple M-series): moisture with all outputs about 35 ms (4
+cycles), large blur about 16 ms at sigma 4 and about 50 ms at sigma 512, flow
+with the wetness index about 0.2 s (MFD).
 
 ### Determinism
 
@@ -661,10 +711,11 @@ cpp/
   src/polyline.h              Nearest-segment queries with a bucket index
   src/matrix_features.cpp     Stamps and path features on matrices
   src/matrix_rivers.cpp       Rivers and random sources on matrices
-  src/matrix_filters.cpp      Matrix erosion and resampling
+  src/matrix_filters.cpp      Matrix erosion, resampling and large Gaussian blurs
   src/matrix_analysis.cpp     Matrix warp, distance fields, slope
   src/matrix_erosion.cpp      Hydraulic (droplet) and thermal erosion
-  src/matrix_network.cpp      Flow accumulation and river networks
+  src/matrix_network.cpp      Flow accumulation, wetness index and river networks
+  src/matrix_climate.cpp      Moisture transport and orographic precipitation
 lua/vnoise.lua                LuaJIT FFI binding + ergonomic wrappers
 examples/love2d/conf.lua      Love2D config (1024x768 window)
 examples/love2d/main.lua      Demo: texture + isometric mesh
@@ -678,6 +729,7 @@ tests/image_ops.lua          Domain, kernels, masks, pipelines (make test)
 tests/terrain.lua            Samplers, sources, gullies, terrain plans (make test)
 tests/matrix_ops.lua         Stamps, path features, rivers, matrix filters (make test)
 tests/landforms.lua          Warp, erosion, distance, slope, flow, river networks (make test)
+tests/climate.lua            Moisture, large blur, wetness index (make test)
 tests/abi.lua                Register-only signatures, octave bound, JIT vs interpreter (make test)
 Makefile                     Cross-platform build, no CMake
 README.md                    This file

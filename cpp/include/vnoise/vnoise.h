@@ -805,6 +805,25 @@ typedef struct {
 VNOISE_API void vnoise_flow(const float* m, int w, int h, const vnoise_flow_t* fp,
                             const float* rain, const vnoise_flow_out_t* out);
 
+/* Topographic wetness index ln(a / tan(beta)) of the same routing: a is the
+ * accumulation A of fp's method (cells of rain draining through the cell, per
+ * unit contour width of one cell), tan(beta) the steepest descent to an
+ * 8-neighbor on the unfilled heights (scaled by relief * max(w, h) as in
+ * vnoise_slope), at least epsilon so pits and flats stay finite. With range > 0
+ * the output is clamp(twi / range, 0, 1); with range <= 0 it is stretched
+ * from the smallest to the largest index of the matrix. */
+typedef struct {
+    float relief;
+    float epsilon;
+    float range;
+} vnoise_twi_t;
+
+/* vnoise_flow plus the wetness index into twi (w * h values, optional):
+ * the outputs of vnoise_flow are identical. */
+VNOISE_API void vnoise_flow_twi(const float* m, int w, int h, const vnoise_flow_t* fp,
+                                const vnoise_twi_t* tp, const float* rain,
+                                const vnoise_flow_out_t* out, float* twi);
+
 /* A whole river network: D8 drainage of the depression-filled heights, a
  * channel wherever the accumulated rain reaches min_flow, traced from every
  * head to the sea, the edge or a larger river (main stems first, so a
@@ -845,6 +864,86 @@ typedef struct {
 /* Returns the number of rivers carved. */
 VNOISE_API int vnoise_river_network(float* height, int w, int h, const vnoise_network_t* np,
                                     const float* rain, const vnoise_network_out_t* out);
+
+/* ------------------------------------------------------------------------
+ * Climate operations on a matrix (same conventions as the landform
+ * operations): blurs at any scale and moisture carried by the wind.
+ * ------------------------------------------------------------------------ */
+
+/* Gaussian blur of any width: `passes` (1..8, 3 when <= 0) successive
+ * extended box filters (Gwosdek et al. 2011: a box of integer radius r with
+ * fractional end weights alpha) per axis, whose variances add up to sigma^2
+ * exactly. Each box costs O(1) per value with prefix sums, so a pass costs
+ * O(w h + (w + h) sigma) whatever sigma is (the second term is the clamped
+ * extension each line carries through the passes). Edges are clamped (the
+ * matrix is extended with its border values, as pipeline stages are), so a
+ * constant matrix stays constant; sigma (at most 16384) may exceed the
+ * matrix size. Not limited by the 32-cell kernel radius of pipelines.
+ * sigma <= 0 copies. dst may alias src. */
+typedef struct {
+    float sigma;
+    int passes;
+} vnoise_blur_t;
+
+VNOISE_API void vnoise_blur_matrix(const float* src, int w, int h, float* dst,
+                                   const vnoise_blur_t* bp);
+
+/* Moisture carried by the wind over a height matrix (orographic
+ * precipitation). The wind at each cell is a unit vector: from dir (0..1 =
+ * one turn clockwise from +x on a y-down screen, as vnoise_warp_matrix)
+ * when given, else from latitude bands by row: bands[0..4] are row
+ * fractions (0..1 of the height, non-decreasing) of the polar front, the
+ * subtropical ridge, the equator, the other subtropical ridge and the other
+ * polar front. Between the ridges blow the trade winds and beyond the polar
+ * fronts the polar easterlies (both toward -x), in between the westerlies
+ * (toward +x); tilt (degrees) turns easterlies toward the equator and
+ * westerlies toward the pole. The bands mirror about the equator, so which
+ * edge is north does not matter.
+ *
+ * The steady state is solved upwind: each cell reads the moisture q at the
+ * point one step against the wind, where the wind ray crosses the previous
+ * column (or row), interpolated linearly between two cells; the step is
+ * L = 1 / max(|ux|, |uy|) cells. Outside the matrix q is `inflow`. On it:
+ *   q += evaporation * src * L, capped at capacity, where src is the source
+ *     matrix (0..1) or, without one, 1 below sea_level and 0 above;
+ *   on land (height >= sea_level) precipitation P = q * clamp(base_rate * L
+ *     + orographic * max(0, rise), 0, 1), rise the height gained over the
+ *     step in cells (heights below sea_level count as sea_level, scaled by
+ *     relief * max(w, h)), and q -= P.
+ * Rain shadows follow: the windward slopes wring the air out and the lee
+ * gets the dry remainder. `iterations` (1..256, 4 when <= 0) cycles of four
+ * Gauss-Seidel sweeps (one per wind quadrant) are run; a uniform wind is
+ * exact after one cycle, and winds that turn need more. */
+typedef struct {
+    float sea_level;
+    float evaporation;
+    float capacity;
+    float base_rate;
+    float orographic;
+    float relief;
+    float inflow;
+    float range;
+    float fetch_range;
+    float bands[5];
+    float tilt;
+    int iterations;
+} vnoise_moisture_t;
+
+/* Outputs of vnoise_moisture (w * h values each); NULL ones are skipped.
+ * precip: P / range clamped to 1 (range <= 0: divided by the largest P);
+ * moisture: q / capacity; fetch: the distance in cells travelled along the
+ * wind since the last cell with src >= 0.5 (0 there; the outside counts as
+ * a source when inflow > 0), min(d, fetch_range) / fetch_range (fetch_range
+ * <= 0: divided by the largest), 1 where no source lies upwind. */
+typedef struct {
+    float* precip;
+    float* moisture;
+    float* fetch;
+} vnoise_moisture_out_t;
+
+VNOISE_API void vnoise_moisture(const float* m, int w, int h, const vnoise_moisture_t* mp,
+                                const float* src, const float* dir,
+                                const vnoise_moisture_out_t* out);
 
 #ifdef __cplusplus
 }

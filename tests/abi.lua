@@ -92,6 +92,14 @@ do
       stages = { { "invert", mask = { "polygon", { 0, 0, 20, 2, 10, 15 } } } },
     }, { w = 16, h = 16, freq = 0.05 })
     acc[#acc + 1] = pipe[100]
+    -- Struct-pointer climate operations, called hot.
+    local hm = fill("fbm", 4)
+    for i = 1, 60 do
+      local p = vnoise.moisture(hm, opts.w, opts.h, { sea_level = 0.5, tilt = i % 7, iterations = 2 })
+      local b = vnoise.blur_large(hm, opts.w, opts.h, { sigma = 0.5 + i % 9 })
+      local _, _, _, t = vnoise.flow(hm, opts.w, opts.h, { twi = true, twi_range = 5 + i % 3 })
+      acc[#acc + 1] = p[i % n] + b[(7 * i) % n] + t[(3 * i) % n]
+    end
     local img = ffi.new("unsigned char[?]", 8 * 8 * 4)
     local fake = {
       getDimensions = function()

@@ -2308,6 +2308,13 @@ typedef struct {
 } vnoise_flow_out_t;
 void vnoise_flow(const float* m, int w, int h, const vnoise_flow_t* fp, const float* rain,
                  const vnoise_flow_out_t* out);
+typedef struct {
+    float relief;
+    float epsilon;
+    float range;
+} vnoise_twi_t;
+void vnoise_flow_twi(const float* m, int w, int h, const vnoise_flow_t* fp, const vnoise_twi_t* tp,
+                     const float* rain, const vnoise_flow_out_t* out, float* twi);
 
 typedef struct {
     float min_flow;
@@ -2510,15 +2517,24 @@ end
 -- outlets at the sea and/or the edges): every cell adds its rain (1 without
 -- a `rain` matrix) to the cells downstream, along the steepest descent
 -- ("d8") or shared among the lower neighbors ("mfd", slope^exponent).
+-- With `twi`, also the topographic wetness index `ln(A / tan(beta))` of the
+-- same accumulation A (cells of rain) and the local slope tan(beta) (the
+-- steepest descent to a neighbor on the unfilled heights, in cells through
+-- `relief`; at least `epsilon` so pits and flats stay finite): `clamp(twi / twi_range, 0, 1)`, or stretched from the
+-- smallest to the largest index of the matrix when `twi_range` is 0. High in
+-- valley floors and flats that drain a large area, low on ridges and steep
+-- slopes.
 -- @param m cdata The height matrix.
 -- @param w number Columns.
 -- @param h number Rows.
 -- @param spec table|nil method ("d8"), exponent (mfd, 1.1), scale ("log", "linear", "range"),
 --   range (cells of rain, scale "range"), sea_level (0), outlets ("both"), lake_depth (0.002),
---   rain (matrix), filled and lake (true to return them too).
+--   rain (matrix), filled and lake (true to return them too), twi (true to return the wetness
+--   index), relief (twi, 0.05), epsilon (twi: smallest tan(beta), 0.001), twi_range (0).
 -- @return cdata The flow matrix (0..1).
 -- @return cdata|nil The depression-filled heights when `spec.filled`.
 -- @return cdata|nil The lake mask (1 where filled more than lake_depth) when `spec.lake`.
+-- @return cdata|nil The wetness index (0..1) when `spec.twi`.
 function vnoise.flow(m, w, h, spec)
   spec = spec or {}
   local fp = ffi.new("vnoise_flow_t")
@@ -2534,8 +2550,20 @@ function vnoise.flow(m, w, h, spec)
   local filled = spec.filled and vnoise.matrix(w, h) or nil
   local lake = spec.lake and vnoise.matrix(w, h) or nil
   out.flow, out.filled, out.lake = flow, filled, lake
-  lib.vnoise_flow(m, w, h, fp, spec.rain, out)
-  return flow, filled, lake
+  if not spec.twi then
+    lib.vnoise_flow(m, w, h, fp, spec.rain, out)
+    return flow, filled, lake
+  end
+  local tp = ffi.new("vnoise_twi_t")
+  tp.relief = num(spec, "relief", 0.05)
+  tp.epsilon = num(spec, "epsilon", 0.001)
+  tp.range = num(spec, "twi_range", 0)
+  if tp.epsilon <= 0 then
+    error("vnoise: flow 'epsilon' must be positive", 2)
+  end
+  local twi = vnoise.matrix(w, h)
+  lib.vnoise_flow_twi(m, w, h, fp, tp, spec.rain, out, twi)
+  return flow, filled, lake, twi
 end
 
 --- Carves a whole river network into a height matrix: the D8 drainage of
@@ -2601,6 +2629,132 @@ function vnoise.river_network(height, w, h, spec, mask)
     rivers[r + 1] = { points = points, width = widths }
   end
   return rivers, mask, flow
+end
+
+-- Climate operations -----------------------------------------------------------
+
+ffi.cdef([[
+typedef struct {
+    float sigma;
+    int passes;
+} vnoise_blur_t;
+void vnoise_blur_matrix(const float* src, int w, int h, float* dst, const vnoise_blur_t* bp);
+
+typedef struct {
+    float sea_level;
+    float evaporation;
+    float capacity;
+    float base_rate;
+    float orographic;
+    float relief;
+    float inflow;
+    float range;
+    float fetch_range;
+    float bands[5];
+    float tilt;
+    int iterations;
+} vnoise_moisture_t;
+typedef struct {
+    float* precip;
+    float* moisture;
+    float* fetch;
+} vnoise_moisture_out_t;
+void vnoise_moisture(const float* m, int w, int h, const vnoise_moisture_t* mp, const float* src,
+                     const float* dir, const vnoise_moisture_out_t* out);
+]])
+
+--- Gaussian blur of any width, in time per cell independent of `sigma`:
+-- `passes` successive extended box filters per axis (integer radius plus
+-- fractional end weights, so the variance is exactly `sigma^2`), with
+-- clamped edges like `apply_stages`. It is not limited by the 32-cell kernel
+-- radius of pipeline stages; `sigma` (up to 16384) may exceed the matrix,
+-- which then tends to a constant. With 3 passes it stays within about 1% of
+-- the value range of the exact Gaussian (more passes come closer).
+-- @param m cdata The matrix (not modified unless it is `out`).
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param spec table sigma (cells, 0 copies), passes (1..8, 3), out (destination; may be `m`).
+-- @return cdata The blurred matrix (a new one unless `out`).
+function vnoise.blur_large(m, w, h, spec)
+  spec = spec or {}
+  local bp = ffi.new("vnoise_blur_t")
+  bp.sigma = num(spec, "sigma", 8)
+  bp.passes = int(spec, "passes", 3, 1, 8)
+  if bp.sigma < 0 then
+    error("vnoise: blur_large 'sigma' must not be negative", 2)
+  end
+  local out = spec.out or vnoise.matrix(w, h)
+  lib.vnoise_blur_matrix(m, w, h, out, bp)
+  return out
+end
+
+local DEFAULT_BANDS = { 1 / 6, 1 / 3, 0.5, 2 / 3, 5 / 6 }
+
+--- Moisture carried by the wind over a height matrix, with orographic
+-- precipitation: the air picks up `evaporation` per cell over the sources
+-- (the `source` matrix, 0..1, or the cells below `sea_level`), up to
+-- `capacity`; over land it rains `base_rate` of its moisture per cell plus
+-- `orographic` times the height it climbs (in cells, `relief`), so windward
+-- slopes are wet and their lee lies in a rain shadow. The wind comes from a
+-- `direction` matrix (0..1 = one turn clockwise from +x, as `warp`) or, by
+-- row, from latitude `bands`: five row fractions (0..1 of the height,
+-- non-decreasing) of the polar front, the subtropical ridge, the equator,
+-- the other ridge and the other polar front. Trade winds (between the
+-- ridges) and polar easterlies (beyond the fronts) blow toward -x, the
+-- westerlies toward +x; `tilt` degrees turn them toward the equator
+-- (easterlies) or the pole (westerlies). The bands mirror about the equator,
+-- so it does not matter which edge is north. Air entering from outside the
+-- matrix carries `inflow`. Solved upwind in `iterations` cycles of four
+-- sweeps (a uniform wind is exact after one).
+-- @param m cdata The height matrix.
+-- @param w number Columns.
+-- @param h number Rows.
+-- @param spec table|nil sea_level (0), evaporation (0.05), capacity (1), base_rate (0.002),
+--   orographic (1), relief (0.05), inflow (0), range (precipitation mapped to 1; 0: the largest),
+--   fetch_range (cells; 0: the largest), bands ({ 1/6, 1/3, 1/2, 2/3, 5/6 }), tilt (degrees, 0),
+--   iterations (1..256, 4), source, direction (matrices), moisture and fetch (true to return
+--   them too), out (destination of the precipitation).
+-- @return cdata The precipitation (0..1).
+-- @return cdata|nil The moisture carried (q / capacity) when `spec.moisture`.
+-- @return cdata|nil The fetch when `spec.fetch`: distance along the wind since the last cell with
+--   source >= 0.5, `min(d, fetch_range) / fetch_range`, 1 where no source lies upwind.
+function vnoise.moisture(m, w, h, spec)
+  spec = spec or {}
+  local mp = ffi.new("vnoise_moisture_t")
+  mp.sea_level = num(spec, "sea_level", 0)
+  mp.evaporation = num(spec, "evaporation", 0.05)
+  mp.capacity = num(spec, "capacity", 1)
+  mp.base_rate = num(spec, "base_rate", 0.002)
+  mp.orographic = num(spec, "orographic", 1)
+  mp.relief = num(spec, "relief", 0.05)
+  mp.inflow = num(spec, "inflow", 0)
+  mp.range = num(spec, "range", 0)
+  mp.fetch_range = num(spec, "fetch_range", 0)
+  mp.tilt = num(spec, "tilt", 0)
+  mp.iterations = int(spec, "iterations", 4, 1, 256)
+  if mp.capacity <= 0 then
+    error("vnoise: moisture 'capacity' must be positive", 2)
+  end
+  local bands = spec.bands or DEFAULT_BANDS
+  if type(bands) ~= "table" or #bands ~= 5 then
+    error("vnoise: moisture 'bands' must be a list of 5 row fractions", 2)
+  end
+  local last = 0
+  for i = 1, 5 do
+    local b = bands[i]
+    if type(b) ~= "number" or b ~= b or b < last or b > 1 then
+      error("vnoise: moisture 'bands' must be non-decreasing numbers in 0..1", 2)
+    end
+    mp.bands[i - 1] = b
+    last = b
+  end
+  local out = ffi.new("vnoise_moisture_out_t")
+  local precip = spec.out or vnoise.matrix(w, h)
+  local moisture = spec.moisture and vnoise.matrix(w, h) or nil
+  local fetch = spec.fetch and vnoise.matrix(w, h) or nil
+  out.precip, out.moisture, out.fetch = precip, moisture, fetch
+  lib.vnoise_moisture(m, w, h, mp, spec.source, spec.direction, out)
+  return precip, moisture, fetch
 end
 
 -- Global statistics as point ops ----------------------------------------------

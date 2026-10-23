@@ -3,8 +3,9 @@
 #include "vnoise/internal.h"
 #include "hydrology.h"
 
-// Matrix filters: stream-power erosion over the shared hydrology, and
-// resampling between matrix sizes.
+// Matrix filters: stream-power erosion over the shared hydrology,
+// resampling between matrix sizes, and Gaussian blurs of any width as
+// successive extended box filters.
 
 namespace {
 
@@ -21,6 +22,53 @@ inline float at(const float* src, int sw, int sh, int i, int j) {
     i = i < 0 ? 0 : (i >= sw ? sw - 1 : i);
     j = j < 0 ? 0 : (j >= sh ? sh - 1 : j);
     return src[j * sw + i];
+}
+
+// One extended box filter (radius r, end weight alpha) over a line of n
+// values, in place, its ends clamped. P (n + 1 prefix sums) and tmp (n
+// values) are scratch. Each output is O(1): the clamped window splits into
+// runs of the first value, a prefix-sum range and runs of the last value.
+void box_line(float* line, int n, int r, double alpha, std::vector<double>& P, std::vector<float>& tmp) {
+    P[0] = 0.0;
+    for (int k = 0; k < n; ++k) {
+        tmp[k] = line[k];
+        P[k + 1] = P[k] + tmp[k];
+    }
+    const double first = tmp[0], last = tmp[n - 1];
+    const double norm = 1.0 / (2.0 * r + 1.0 + 2.0 * alpha);
+    for (int q = 0; q < n; ++q) {
+        const long a = (long)q - r, b = (long)q + r;
+        double sum = 0.0;
+        if (a < 0) sum += first * (double)((b < 0 ? b : -1) - a + 1);
+        if (b >= n) sum += last * (double)(b - (a > n ? a : n) + 1);
+        const long lo = a < 0 ? 0 : a, hi = b >= n ? n - 1 : b;
+        if (lo <= hi) sum += P[hi + 1] - P[lo];
+        if (alpha > 0.0) {
+            const long e0 = a - 1, e1 = b + 1;
+            sum += alpha * (e0 < 0 ? first : (e0 >= n ? last : (double)tmp[e0]));
+            sum += alpha * (e1 < 0 ? first : (e1 >= n ? last : (double)tmp[e1]));
+        }
+        line[q] = (float)(sum * norm);
+    }
+}
+
+// Blurs every line of an axis (n values at `stride`, lines `step` apart):
+// each line is extended by `pad` copies of its end values, so the boxes see
+// the original clamped extension in every pass (the extension's far ends
+// stay constant while pad covers the reach of all passes), filtered, and its
+// middle written back.
+void blur_axis(float* m, int lines, int step, int n, int stride, int passes, int r, double alpha,
+               int pad, std::vector<float>& ext, std::vector<double>& P, std::vector<float>& tmp) {
+    const int len = n + 2 * pad;
+    for (int l = 0; l < lines; ++l) {
+        float* line = m + (size_t)l * step;
+        for (int t = 0; t < len; ++t) {
+            const int k = t - pad;
+            ext[t] = line[(size_t)(k < 0 ? 0 : (k >= n ? n - 1 : k)) * stride];
+        }
+        for (int p = 0; p < passes; ++p) box_line(ext.data(), len, r, alpha, P, tmp);
+        for (int k = 0; k < n; ++k) line[(size_t)k * stride] = ext[k + pad];
+    }
 }
 
 // Erodes a matrix that fits the node budget; writes heights and flow.
@@ -127,4 +175,31 @@ extern "C" VNOISE_API void vnoise_erode_matrix(float* m, int w, int h, const vno
     vnoise_resample(low.data(), sw, sh, delta.data(), w, h, VNOISE_RESAMPLE_BILINEAR);
     for (int k = 0; k < w * h; ++k) m[k] = clamp01(m[k] + delta[k]);
     if (flow_out) vnoise_resample(flow_low.data(), sw, sh, flow_out, w, h, VNOISE_RESAMPLE_BILINEAR);
+}
+
+extern "C" VNOISE_API void vnoise_blur_matrix(const float* src, int w, int h, float* dst,
+                                              const vnoise_blur_t* bp) {
+    if (!src || !dst || !bp || w <= 0 || h <= 0) return;
+    const size_t n = (size_t)w * h;
+    if (dst != src) {
+        for (size_t k = 0; k < n; ++k) dst[k] = src[k];
+    }
+    const double sigma = bp->sigma > 16384.0f ? 16384.0 : bp->sigma;
+    if (sigma > 0.0) {
+        const int passes = bp->passes <= 0 ? 3 : (bp->passes > 8 ? 8 : bp->passes);
+        // Every pass has variance sigma^2 / passes: the largest integer box
+        // radius whose variance r (r + 1) / 3 does not exceed it, and the end
+        // weight that makes up the difference exactly (0 <= alpha < 1).
+        const double v = sigma * sigma / passes;
+        const int r = (int)floor(0.5 * sqrt(12.0 * v + 1.0) - 0.5);
+        const double rr = (double)r;
+        const double alpha = (2.0 * rr + 1.0) * (rr * (rr + 1.0) / 3.0 - v) / (2.0 * (v - (rr + 1.0) * (rr + 1.0)));
+        const int pad = passes * (r + 1) + 1;
+        const int len = (w > h ? w : h) + 2 * pad;
+        std::vector<float> ext(len), tmp(len);
+        std::vector<double> P(len + 1);
+        blur_axis(dst, h, w, w, 1, passes, r, alpha, pad, ext, P, tmp);
+        blur_axis(dst, w, 1, h, w, passes, r, alpha, pad, ext, P, tmp);
+    }
+    for (size_t k = 0; k < n; ++k) dst[k] = clamp01(dst[k]);
 }

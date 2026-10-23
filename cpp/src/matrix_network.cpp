@@ -5,7 +5,8 @@
 #include "hydrology.h"
 
 // Drainage of a whole matrix: flow accumulation (D8 or multiple flow
-// directions) over the depression-filled heights, and a river network that
+// directions) over the depression-filled heights, the topographic wetness
+// index of that accumulation, and a river network that
 // follows the D8 drainage from every channel head to the sea, the edge or a
 // larger river, carving all channels in one pass over a segment index.
 
@@ -145,15 +146,46 @@ struct SegmentIndex {
     }
 };
 
-} // namespace
+// Topographic wetness index ln(A / tan(beta)) per cell: tan(beta) is the
+// steepest descent to an 8-neighbor on the unfilled heights, in cells,
+// floored at epsilon (pits and flats). A centered gradient would read a
+// sharp crest as flat; the steepest descent is the slope its water leaves by.
+void write_twi(const Surface& s, const std::vector<double>& A, const vnoise_twi_t* tp, float* out) {
+    const Grid& g = s.g;
+    const int n = g.n;
+    const double Z = (double)tp->relief * (double)(g.mw > g.mh ? g.mw : g.mh);
+    const double eps = tp->epsilon > 0.0f ? tp->epsilon : 1e-3;
+    std::vector<double> t(n);
+    double lo = 1e300, hi = -1e300;
+    for (int c = 0; c < n; ++c) {
+        double tanb = 0.0;
+        for (int k = 0; k < 8; ++k) {
+            int nb;
+            if (!g.neighbor(c, k, &nb)) continue;
+            const double d = (s.H[c] - s.H[nb]) * Z / NDIST[k];
+            tanb = d > tanb ? d : tanb;
+        }
+        // A cell without rain (rain matrix 0) still drains itself: the area
+        // is floored at a thousandth of a cell to keep the log finite.
+        const double v = log((A[c] > 1e-3 ? A[c] : 1e-3) / (tanb > eps ? tanb : eps));
+        t[c] = v;
+        lo = v < lo ? v : lo;
+        hi = v > hi ? v : hi;
+    }
+    for (int k = 0; k < n; ++k) {
+        double v;
+        if (tp->range > 0.0f) v = t[k] / tp->range;
+        else v = hi > lo ? (t[k] - lo) / (hi - lo) : 0.0;
+        out[k] = clamp01((float)v);
+    }
+}
 
-extern "C" VNOISE_API void vnoise_flow(const float* m, int w, int h, const vnoise_flow_t* fp,
-                                       const float* rain, const vnoise_flow_out_t* out) {
-    if (!m || !fp || !out || w <= 0 || h <= 0) return;
+void flow_impl(const float* m, int w, int h, const vnoise_flow_t* fp, const vnoise_twi_t* tp,
+               const float* rain, const vnoise_flow_out_t* out, float* twi) {
     Surface s;
     build_surface(m, w, h, fp->sea_level, fp->outlets, s);
     const int n = s.g.n;
-    if (out->flow) {
+    if (out->flow || twi) {
         std::vector<double> A;
         if (fp->method == VNOISE_FLOW_MFD) {
             accumulate_mfd(s, rain, fp->exponent, A);
@@ -161,7 +193,8 @@ extern "C" VNOISE_API void vnoise_flow(const float* m, int w, int h, const vnois
             std::vector<int> recv, order;
             accumulate_d8(s, rain, recv, order, A);
         }
-        write_flow(A, n, fp->scale, fp->range, out->flow);
+        if (out->flow) write_flow(A, n, fp->scale, fp->range, out->flow);
+        if (twi) write_twi(s, A, tp, twi);
     }
     if (out->filled) {
         for (int k = 0; k < n; ++k) out->filled[k] = clamp01((float)s.F[k]);
@@ -169,6 +202,21 @@ extern "C" VNOISE_API void vnoise_flow(const float* m, int w, int h, const vnois
     if (out->lake) {
         for (int k = 0; k < n; ++k) out->lake[k] = s.F[k] - s.H[k] > (double)fp->lake_depth ? 1.0f : 0.0f;
     }
+}
+
+} // namespace
+
+extern "C" VNOISE_API void vnoise_flow(const float* m, int w, int h, const vnoise_flow_t* fp,
+                                       const float* rain, const vnoise_flow_out_t* out) {
+    if (!m || !fp || !out || w <= 0 || h <= 0) return;
+    flow_impl(m, w, h, fp, 0, rain, out, 0);
+}
+
+extern "C" VNOISE_API void vnoise_flow_twi(const float* m, int w, int h, const vnoise_flow_t* fp,
+                                           const vnoise_twi_t* tp, const float* rain,
+                                           const vnoise_flow_out_t* out, float* twi) {
+    if (!m || !fp || !out || w <= 0 || h <= 0) return;
+    flow_impl(m, w, h, fp, tp, rain, out, tp ? twi : 0);
 }
 
 extern "C" VNOISE_API int vnoise_river_network(float* height, int w, int h, const vnoise_network_t* np,
